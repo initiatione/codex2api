@@ -152,7 +152,8 @@ func (s *Store) Init(ctx context.Context, cfg *config.Config) error {
 	}
 
 	if len(s.accounts) == 0 {
-		return fmt.Errorf("未找到任何账号")
+		log.Println("⚠ 数据库中暂无账号，请通过管理后台添加")
+		return nil
 	}
 
 	// 3. 并行刷新所有账号的 AT
@@ -166,7 +167,8 @@ func (s *Store) Init(ctx context.Context, cfg *config.Config) error {
 	}
 
 	if successCount == 0 {
-		return fmt.Errorf("所有账号初始化失败")
+		log.Println("⚠ 所有账号刷新失败，服务仍将启动")
+		return nil
 	}
 
 	log.Printf("账号初始化完成: %d/%d 成功", successCount, len(s.accounts))
