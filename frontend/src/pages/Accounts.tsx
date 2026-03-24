@@ -7,6 +7,7 @@ import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
 import StatusBadge from '../components/StatusBadge'
 import { useDataLoader } from '../hooks/useDataLoader'
+import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
 import type { AccountRow, AddAccountRequest } from '../types'
 import { getErrorMessage } from '../utils/error'
@@ -41,6 +42,7 @@ export default function Accounts() {
   const [cleaningRateLimited, setCleaningRateLimited] = useState(false)
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null)
   const { toast, showToast } = useToast()
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   const loadAccounts = useCallback(async () => {
     const data = await api.getAccounts()
@@ -98,7 +100,19 @@ export default function Accounts() {
   }
 
   const handleDelete = async (account: AccountRow) => {
-    if (!confirm(`确定删除账号 "${account.email || account.id}" 吗？`)) return
+    const confirmed = await confirm({
+      title: '删除账号',
+      description: (
+        <>
+          账号 <span className="font-semibold text-foreground">{account.email || `ID ${account.id}`}</span> 将从当前账号池中移除。
+          该操作会立即生效，且通常不再恢复。
+        </>
+      ),
+      confirmText: '确认删除',
+      tone: 'destructive',
+      confirmVariant: 'destructive',
+    })
+    if (!confirmed) return
     try {
       await api.deleteAccount(account.id)
       showToast('已删除')
@@ -127,7 +141,14 @@ export default function Accounts() {
 
   const handleBatchDelete = async () => {
     if (selected.size === 0) return
-    if (!confirm(`确定删除选中的 ${selected.size} 个账号吗？`)) return
+    const confirmed = await confirm({
+      title: '批量删除账号',
+      description: `选中的 ${selected.size} 个账号会一起从账号池中移除。请确认当前选择无误。`,
+      confirmText: '确认删除',
+      tone: 'destructive',
+      confirmVariant: 'destructive',
+    })
+    if (!confirmed) return
     setBatchLoading(true)
     let success = 0
     let fail = 0
@@ -177,7 +198,13 @@ export default function Accounts() {
   }
 
   const handleCleanBanned = async () => {
-    if (!confirm('确定清理所有封禁（unauthorized）账号吗？')) return
+    const confirmed = await confirm({
+      title: '清理封禁账号',
+      description: '会清除所有 unauthorized 状态标记，让这些账号重新参与调度与测试。',
+      confirmText: '确认清理',
+      tone: 'warning',
+    })
+    if (!confirmed) return
     setCleaningBanned(true)
     try {
       const result = await api.cleanBanned()
@@ -191,7 +218,13 @@ export default function Accounts() {
   }
 
   const handleCleanRateLimited = async () => {
-    if (!confirm('确定清理所有限流（rate_limited）账号吗？')) return
+    const confirmed = await confirm({
+      title: '清理限流账号',
+      description: '会清除所有 rate_limited 状态标记，让这些账号重新回到可调度状态。',
+      confirmText: '确认清理',
+      tone: 'warning',
+    })
+    if (!confirmed) return
     setCleaningRateLimited(true)
     try {
       const result = await api.cleanRateLimited()
@@ -424,6 +457,8 @@ export default function Accounts() {
             onClose={() => setTestingAccount(null)}
           />
         )}
+
+        {confirmDialog}
 
         {toast ? (
           <div

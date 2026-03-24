@@ -4,6 +4,7 @@ import { api } from '../api'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
+import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
 import type { APIKeyRow, HealthResponse, SystemSettings } from '../types'
 import { getErrorMessage } from '../utils/error'
@@ -34,6 +35,7 @@ export default function Settings() {
   const [savingSettings, setSavingSettings] = useState(false)
   const [modelList, setModelList] = useState<string[]>([])
   const { toast, showToast } = useToast()
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   const loadSettingsData = useCallback(async () => {
     const [health, keysResponse, settings, modelsResp] = await Promise.all([api.getHealth(), api.getAPIKeys(), api.getSettings(), api.getModels()])
@@ -70,7 +72,14 @@ export default function Settings() {
   }
 
   const handleDeleteKey = async (id: number) => {
-    if (!confirm('确定删除此密钥？使用该密钥的客户端将无法访问。')) {
+    const confirmed = await confirm({
+      title: '删除 API 密钥',
+      description: '删除后，所有使用该密钥的客户端都会立即失去访问权限。请确认这是你要执行的操作。',
+      confirmText: '确认删除',
+      tone: 'destructive',
+      confirmVariant: 'destructive',
+    })
+    if (!confirmed) {
       return
     }
 
@@ -344,6 +353,7 @@ export default function Settings() {
             {toast.msg}
           </div>
         ) : null}
+        {confirmDialog}
       </>
     </StateShell>
   )

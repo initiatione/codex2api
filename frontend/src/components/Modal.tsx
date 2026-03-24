@@ -17,6 +17,7 @@ interface ModalProps {
   contentClassName?: string
   bodyClassName?: string
   titleClassName?: string
+  showCloseButton?: boolean
 }
 
 export default function Modal({
@@ -28,10 +29,12 @@ export default function Modal({
   contentClassName,
   bodyClassName,
   titleClassName,
+  showCloseButton = true,
 }: ModalProps) {
   return (
     <Dialog open={show} onOpenChange={(open) => { if (!open) onClose() }}>
       <DialogContent
+        showCloseButton={showCloseButton}
         className={cn(
           'max-h-[calc(100vh-2rem)] overflow-hidden p-0 sm:max-w-[520px]',
           contentClassName

@@ -4,6 +4,7 @@ import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
+import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
 import type { UsageLog, UsageStats } from '../types'
 import { Card, CardContent } from '@/components/ui/card'
@@ -46,6 +47,7 @@ function formatTime(iso: string): string {
 
 export default function Usage() {
   const { toast, showToast } = useToast()
+  const { confirm, confirmDialog } = useConfirmDialog()
   const [page, setPage] = useState(1)
   const [clearing, setClearing] = useState(false)
   const PAGE_SIZE = 20
@@ -207,7 +209,14 @@ export default function Usage() {
                   size="sm"
                   disabled={clearing || logs.length === 0}
                   onClick={async () => {
-                    if (!confirm('确定清空所有使用日志吗？此操作不可恢复。')) return
+                    const confirmed = await confirm({
+                      title: '清空使用日志',
+                      description: '所有请求日志都会被清空，统计视图会立刻更新。该操作不可恢复。',
+                      confirmText: '确认清空',
+                      tone: 'destructive',
+                      confirmVariant: 'destructive',
+                    })
+                    if (!confirmed) return
                     setClearing(true)
                     try {
                       await api.clearUsageLogs()
@@ -377,6 +386,7 @@ export default function Usage() {
             {toast.msg}
           </div>
         ) : null}
+        {confirmDialog}
       </>
     </StateShell>
   )
