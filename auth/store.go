@@ -109,6 +109,13 @@ func (a *Account) GetCooldownReason() string {
 	return a.CooldownReason
 }
 
+// HasActiveCooldown 检查账号是否仍处于冷却期
+func (a *Account) HasActiveCooldown() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Status == StatusCooldown && time.Now().Before(a.CooldownUtil)
+}
+
 // RuntimeStatus 返回运行时状态字符串（供 admin API 使用）
 func (a *Account) RuntimeStatus() string {
 	a.mu.RLock()
@@ -272,6 +279,13 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 			account.AccountID = row.GetCredential("account_id")
 			account.Email = row.GetCredential("email")
 			account.PlanType = row.GetCredential("plan_type")
+			if expiresAt := row.GetCredential("expires_at"); expiresAt != "" {
+				if parsed, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+					account.ExpiresAt = parsed
+				} else {
+					log.Printf("[账号 %d] 解析 expires_at 失败: %v", row.ID, err)
+				}
+			}
 		}
 		if row.CooldownUntil.Valid {
 			if time.Now().Before(row.CooldownUntil.Time) {
@@ -560,6 +574,9 @@ func (s *Store) parallelRefreshAll(ctx context.Context) {
 		if acc.Status == StatusError {
 			continue
 		}
+		if acc.HasActiveCooldown() {
+			continue
+		}
 		if !acc.NeedsRefresh() {
 			continue
 		}
@@ -586,6 +603,10 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	rt := acc.RefreshToken
 	proxy := acc.ProxyURL
 	dbID := acc.DBID
+	cooldownUntil := acc.CooldownUtil
+	cooldownReason := acc.CooldownReason
+	activeCooldown := acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)
+	expiredCooldown := acc.Status == StatusCooldown && !time.Now().Before(acc.CooldownUtil)
 	acc.mu.RUnlock()
 
 	// 1. 尝试从 Redis 缓存读取 AT
@@ -596,8 +617,19 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 		if acc.ExpiresAt.IsZero() || time.Until(acc.ExpiresAt) < 5*time.Minute {
 			acc.ExpiresAt = time.Now().Add(30 * time.Minute)
 		}
-		acc.Status = StatusReady
+		if activeCooldown {
+			acc.Status = StatusCooldown
+			acc.CooldownUtil = cooldownUntil
+			acc.CooldownReason = cooldownReason
+		} else {
+			acc.Status = StatusReady
+			acc.CooldownUtil = time.Time{}
+			acc.CooldownReason = ""
+		}
 		acc.mu.Unlock()
+		if expiredCooldown {
+			_ = s.db.ClearCooldown(ctx, dbID)
+		}
 		return nil
 	}
 
@@ -613,8 +645,19 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 			acc.mu.Lock()
 			acc.AccessToken = token
 			acc.ExpiresAt = time.Now().Add(55 * time.Minute)
-			acc.Status = StatusReady
+			if activeCooldown {
+				acc.Status = StatusCooldown
+				acc.CooldownUtil = cooldownUntil
+				acc.CooldownReason = cooldownReason
+			} else {
+				acc.Status = StatusReady
+				acc.CooldownUtil = time.Time{}
+				acc.CooldownReason = ""
+			}
 			acc.mu.Unlock()
+			if expiredCooldown {
+				_ = s.db.ClearCooldown(ctx, dbID)
+			}
 			return nil
 		}
 	} else if acquired {
@@ -640,12 +683,20 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	acc.AccessToken = td.AccessToken
 	acc.RefreshToken = td.RefreshToken
 	acc.ExpiresAt = td.ExpiresAt
-	acc.Status = StatusReady
 	acc.ErrorMsg = ""
 	if info != nil {
 		acc.AccountID = info.ChatGPTAccountID
 		acc.Email = info.Email
 		acc.PlanType = info.PlanType
+	}
+	if activeCooldown {
+		acc.Status = StatusCooldown
+		acc.CooldownUtil = cooldownUntil
+		acc.CooldownReason = cooldownReason
+	} else {
+		acc.Status = StatusReady
+		acc.CooldownUtil = time.Time{}
+		acc.CooldownReason = ""
 	}
 	acc.mu.Unlock()
 
@@ -669,6 +720,11 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	}
 	if err := s.db.UpdateCredentials(ctx, dbID, credentials); err != nil {
 		log.Printf("[账号 %d] 更新数据库失败: %v", dbID, err)
+	}
+	if expiredCooldown {
+		if err := s.db.ClearCooldown(ctx, dbID); err != nil {
+			log.Printf("[账号 %d] 清理过期冷却状态失败: %v", dbID, err)
+		}
 	}
 
 	return nil
