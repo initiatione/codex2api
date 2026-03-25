@@ -2,8 +2,9 @@
 
 # ============================================================
 # Stage 1: 构建前端 (React + Vite)
+# 前端产物是纯静态文件，只需构建一次，与目标平台无关
 # ============================================================
-FROM node:20-alpine AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
 
 ARG BUILD_VERSION=dev
 
@@ -15,9 +16,12 @@ COPY frontend/ .
 RUN VITE_APP_VERSION=${BUILD_VERSION} npm run build
 
 # ============================================================
-# Stage 2: 构建 Go 后端 (嵌入前端静态文件)
+# Stage 2: 构建 Go 后端
+# 使用 BUILDPLATFORM 原生运行 + TARGETARCH 交叉编译
 # ============================================================
-FROM golang:1.25-alpine AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS go-builder
+
+ARG TARGETARCH
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -25,15 +29,14 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
 COPY . .
-# 将前端构建产物复制到 frontend/dist，供 go:embed 使用
 COPY --from=frontend-builder /frontend/dist ./frontend/dist
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /codex2api .
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /codex2api .
 
 # ============================================================
-# Stage 3: 最终运行镜像 (最小化体积)
+# Stage 3: 最终运行镜像
 # ============================================================
 FROM alpine:3.19
 
