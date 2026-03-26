@@ -34,6 +34,7 @@ export default function Accounts() {
   const [page, setPage] = useState(1)
   const [statusFilter, setStatusFilter] = useState<'all' | 'normal' | 'rate_limited' | 'banned'>('all')
   const [searchQuery, setSearchQuery] = useState('')
+  const [planFilter, setPlanFilter] = useState<'all' | 'pro' | 'team' | 'free'>('all')
   const [sortKey, setSortKey] = useState<'requests' | 'usage' | 'importTime' | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -113,6 +114,11 @@ export default function Accounts() {
       case 'banned':
         if (account.status !== 'unauthorized') return false
         break
+    }
+    // 套餐过滤
+    if (planFilter !== 'all') {
+      const plan = (account.plan_type || '').toLowerCase()
+      if (plan !== planFilter) return false
     }
     // 搜索过滤
     if (searchQuery) {
@@ -519,14 +525,31 @@ export default function Accounts() {
           <SchedulerChip label={t('status.unauthorized')} value={bannedAccounts} tone="neutral" />
         </div>
 
-        <div className="mb-4 relative">
-          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
-          <Input
-            className="pl-10 h-9 rounded-xl"
-            placeholder={t('accounts.searchPlaceholder')}
-            value={searchQuery}
-            onChange={(e: ChangeEvent<HTMLInputElement>) => { setSearchQuery(e.target.value); setPage(1) }}
-          />
+        <div className="mb-4 flex items-center gap-2">
+          <div className="relative w-64">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+            <Input
+              className="pl-9 h-8 rounded-lg text-[13px]"
+              placeholder={t('accounts.searchPlaceholder')}
+              value={searchQuery}
+              onChange={(e: ChangeEvent<HTMLInputElement>) => { setSearchQuery(e.target.value); setPage(1) }}
+            />
+          </div>
+          <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5">
+            {(['all', 'pro', 'team', 'free'] as const).map((key) => (
+              <button
+                key={key}
+                onClick={() => { setPlanFilter(key); setPage(1) }}
+                className={`rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                  planFilter === key
+                    ? 'bg-background shadow-sm text-foreground'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {key === 'all' ? t('accounts.filterAll') : key.charAt(0).toUpperCase() + key.slice(1)}
+              </button>
+            ))}
+          </div>
         </div>
 
         {selected.size > 0 && (
@@ -632,29 +655,7 @@ export default function Accounts() {
                           </div>
                         </TableCell>
                         <TableCell>
-                          {account.plan_type?.toLowerCase() === 'free' ? (
-                            account.usage_percent_7d !== null && account.usage_percent_7d !== undefined ? (
-                              <div className="w-24">
-                                <div className="flex items-center justify-between mb-1">
-                                  <span className="text-[12px] font-medium">{account.usage_percent_7d.toFixed(1)}%</span>
-                                </div>
-                                <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-                                  <div
-                                    className={`h-full rounded-full transition-all ${
-                                      account.usage_percent_7d >= 90 ? 'bg-red-500' :
-                                        account.usage_percent_7d >= 70 ? 'bg-amber-500' :
-                                          'bg-emerald-500'
-                                    }`}
-                                    style={{ width: `${Math.min(100, account.usage_percent_7d)}%` }}
-                                  />
-                                </div>
-                              </div>
-                            ) : (
-                              <span className="text-[12px] font-medium text-muted-foreground">{t('accounts.notCollected')}</span>
-                            )
-                          ) : (
-                            <span className="text-[13px] text-muted-foreground">-</span>
-                          )}
+                          <UsageCell account={account} t={t} />
                         </TableCell>
                         <TableCell className="text-[13px] text-muted-foreground whitespace-nowrap">{formatBeijingTime(account.created_at)}</TableCell>
                         <TableCell className="text-[14px] text-muted-foreground">{formatRelativeTime(account.updated_at)}</TableCell>
@@ -881,7 +882,7 @@ export default function Accounts() {
         <Modal
           show={showImportPicker}
           title={t('accounts.importTitle')}
-          contentClassName="sm:max-w-[420px]"
+          contentClassName="sm:max-w-[520px]"
           onClose={() => setShowImportPicker(false)}
         >
           <div className="grid grid-cols-2 gap-3">
@@ -1283,4 +1284,78 @@ function TestConnectionModal({
       </div>
     </Modal>
   )
+}
+
+// 格式化重置倒计时
+function formatResetTime(resetAt: string | undefined): string | null {
+  if (!resetAt) return null
+  const diff = new Date(resetAt).getTime() - Date.now()
+  if (diff <= 0) return null
+  const h = Math.floor(diff / 3_600_000)
+  const m = Math.floor((diff % 3_600_000) / 60_000)
+  if (h > 24) {
+    const d = Math.floor(h / 24)
+    return `${d}d${h % 24}h`
+  }
+  return h > 0 ? `${h}h${m}m` : `${m}m`
+}
+
+// 用量进度条颜色
+function usageBarColor(pct: number): string {
+  if (pct >= 90) return 'bg-red-500'
+  if (pct >= 70) return 'bg-amber-500'
+  return 'bg-emerald-500'
+}
+
+// 单行用量进度条
+function UsageBar({ label, pct, resetAt, t }: { label: string; pct: number; resetAt?: string; t: (k: string, o?: Record<string, string>) => string }) {
+  const resetText = formatResetTime(resetAt)
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[10px] text-muted-foreground w-5 shrink-0">{label}</span>
+      <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden min-w-[48px]">
+        <div className={`h-full rounded-full transition-all ${usageBarColor(pct)}`} style={{ width: `${Math.min(100, pct)}%` }} />
+      </div>
+      <span className="text-[11px] font-medium w-[38px] text-right shrink-0">{pct.toFixed(1)}%</span>
+      {resetText && <span className="text-[9px] text-muted-foreground whitespace-nowrap">{t('accounts.resetIn', { time: resetText })}</span>}
+    </div>
+  )
+}
+
+// 用量列组件
+function UsageCell({ account, t }: { account: AccountRow; t: (k: string, o?: Record<string, string>) => string }) {
+  const plan = (account.plan_type || '').toLowerCase()
+  const has7d = account.usage_percent_7d !== null && account.usage_percent_7d !== undefined
+  const has5h = account.usage_percent_5h !== null && account.usage_percent_5h !== undefined
+
+  if (plan === 'free') {
+    // Free: 只显示 7d
+    if (!has7d) return <span className="text-[12px] text-muted-foreground">{t('accounts.notCollected')}</span>
+    return (
+      <div className="w-32">
+        <UsageBar label={t('accounts.usage7d')} pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} t={t} />
+      </div>
+    )
+  }
+
+  if (plan === 'pro' || plan === 'team') {
+    // Pro/Team: 显示 5h + 7d
+    if (!has5h && !has7d) return <span className="text-[12px] text-muted-foreground">{t('accounts.notCollected')}</span>
+    return (
+      <div className="w-44 space-y-1">
+        {has5h && <UsageBar label={t('accounts.usage5h')} pct={account.usage_percent_5h!} resetAt={account.reset_5h_at} t={t} />}
+        {has7d && <UsageBar label={t('accounts.usage7d')} pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} t={t} />}
+      </div>
+    )
+  }
+
+  // 其他套餐：只显示已有数据
+  if (has7d) {
+    return (
+      <div className="w-32">
+        <UsageBar label={t('accounts.usage7d')} pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} t={t} />
+      </div>
+    )
+  }
+  return <span className="text-[13px] text-muted-foreground">-</span>
 }

@@ -47,6 +47,9 @@ export interface AccountRow {
   success_requests?: number
   error_requests?: number
   usage_percent_7d?: number | null
+  usage_percent_5h?: number | null
+  reset_5h_at?: ISODateString
+  reset_7d_at?: ISODateString
 }
 
 export type AccountsResponse = ApiListResponse<'accounts', AccountRow>

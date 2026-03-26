@@ -54,6 +54,10 @@ type Account struct {
 	// 用量进度（从 Codex 响应头被动解析）
 	UsagePercent7d        float64 // 7d 窗口使用率 0-100+
 	UsagePercent7dValid   bool
+	Reset7dAt             time.Time // 7d 窗口重置时间
+	UsagePercent5h        float64   // 5h 窗口使用率 0-100+
+	UsagePercent5hValid   bool
+	Reset5hAt             time.Time // 5h 窗口重置时间
 	UsageUpdatedAt        time.Time
 	usageProbeInFlight    bool
 	recoveryProbeInFlight bool
@@ -477,6 +481,43 @@ func (a *Account) GetUsagePercent7d() (float64, bool) {
 	return a.UsagePercent7d, a.UsagePercent7dValid
 }
 
+// SetUsageSnapshot5h 更新 5h 用量快照
+func (a *Account) SetUsageSnapshot5h(pct float64, resetAt time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.UsagePercent5h = pct
+	a.UsagePercent5hValid = true
+	a.Reset5hAt = resetAt
+}
+
+// GetUsagePercent5h 获取 5h 用量百分比
+func (a *Account) GetUsagePercent5h() (float64, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.UsagePercent5h, a.UsagePercent5hValid
+}
+
+// SetReset7dAt 设置 7d 窗口重置时间
+func (a *Account) SetReset7dAt(t time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Reset7dAt = t
+}
+
+// GetReset5hAt 获取 5h 窗口重置时间
+func (a *Account) GetReset5hAt() time.Time {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Reset5hAt
+}
+
+// GetReset7dAt 获取 7d 窗口重置时间
+func (a *Account) GetReset7dAt() time.Time {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Reset7dAt
+}
+
 // GetPlanType 获取账号套餐类型
 func (a *Account) GetPlanType() string {
 	a.mu.RLock()
@@ -870,8 +911,26 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 					}
 				}
 				account.SetUsageSnapshot(parsed, updatedAt)
+				// 恢复 7d 重置时间
+				if resetAt := row.GetCredential("codex_7d_reset_at"); resetAt != "" {
+					if t, err := time.Parse(time.RFC3339, resetAt); err == nil {
+						account.SetReset7dAt(t)
+					}
+				}
 			} else {
 				log.Printf("[账号 %d] 解析 codex_7d_used_percent 失败: %v", row.ID, err)
+			}
+		}
+		// 恢复 5h 用量快照
+		if usagePct5h := row.GetCredential("codex_5h_used_percent"); usagePct5h != "" {
+			if parsed, err := strconv.ParseFloat(usagePct5h, 64); err == nil {
+				resetAt := time.Time{}
+				if r := row.GetCredential("codex_5h_reset_at"); r != "" {
+					if t, err := time.Parse(time.RFC3339, r); err == nil {
+						resetAt = t
+					}
+				}
+				account.SetUsageSnapshot5h(parsed, resetAt)
 			}
 		}
 		account.mu.Lock()
@@ -1256,7 +1315,7 @@ func (s *Store) ReportRequestFailure(acc *Account, kind string, latency time.Dur
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 }
 
-// PersistUsageSnapshot 持久化账号 7d 用量快照
+// PersistUsageSnapshot 持久化账号用量快照（7d + 5h）
 func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 	if acc == nil {
 		return
@@ -1266,6 +1325,18 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 	acc.SetUsageSnapshot(pct7d, now)
 
 	if s.db == nil {
+		return
+	}
+
+	// 如果有 5h 数据，使用完整存储
+	if pct5h, ok := acc.GetUsagePercent5h(); ok {
+		reset5hAt := acc.GetReset5hAt()
+		reset7dAt := acc.GetReset7dAt()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, now); err != nil {
+			log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
+		}
 		return
 	}
 

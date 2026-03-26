@@ -191,6 +191,9 @@ type accountResponse struct {
 	SuccessRequests    int64                      `json:"success_requests"`
 	ErrorRequests      int64                      `json:"error_requests"`
 	UsagePercent7d     *float64                   `json:"usage_percent_7d"`
+	UsagePercent5h     *float64                   `json:"usage_percent_5h"`
+	Reset5hAt          string                     `json:"reset_5h_at,omitempty"`
+	Reset7dAt          string                     `json:"reset_7d_at,omitempty"`
 	ScoreBreakdown     schedulerBreakdownResponse `json:"scheduler_breakdown"`
 	LastUnauthorizedAt string                     `json:"last_unauthorized_at,omitempty"`
 	LastRateLimitedAt  string                     `json:"last_rate_limited_at,omitempty"`
@@ -265,6 +268,15 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			}
 			if usagePct, ok := acc.GetUsagePercent7d(); ok {
 				resp.UsagePercent7d = &usagePct
+			}
+			if usagePct5h, ok := acc.GetUsagePercent5h(); ok {
+				resp.UsagePercent5h = &usagePct5h
+			}
+			if t := acc.GetReset5hAt(); !t.IsZero() {
+				resp.Reset5hAt = t.Format(time.RFC3339)
+			}
+			if t := acc.GetReset7dAt(); !t.IsZero() {
+				resp.Reset7dAt = t.Format(time.RFC3339)
 			}
 			if t := acc.GetLastUsedAt(); !t.IsZero() {
 				resp.LastUsedAt = t.Format(time.RFC3339)

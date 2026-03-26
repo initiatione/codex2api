@@ -1070,46 +1070,78 @@ func windowMinutesToCooldown(windowMinutes float64) time.Duration {
 	}
 }
 
-// parseCodexUsageHeaders 从 Codex 响应头解析 7d 用量百分比
+// parseCodexUsageHeaders 从 Codex 响应头解析 5h/7d 用量百分比
 func parseCodexUsageHeaders(resp *http.Response, account *auth.Account) (float64, bool) {
 	if resp == nil {
 		return 0, false
 	}
 
 	// 解析 primary 和 secondary 窗口
-	primaryUsed := resp.Header.Get("x-codex-primary-used-percent")
-	primaryWindow := resp.Header.Get("x-codex-primary-window-minutes")
-	secondaryUsed := resp.Header.Get("x-codex-secondary-used-percent")
-	secondaryWindow := resp.Header.Get("x-codex-secondary-window-minutes")
+	primaryUsedStr := resp.Header.Get("x-codex-primary-used-percent")
+	primaryWindowStr := resp.Header.Get("x-codex-primary-window-minutes")
+	primaryResetStr := resp.Header.Get("x-codex-primary-reset-after-seconds")
+	secondaryUsedStr := resp.Header.Get("x-codex-secondary-used-percent")
+	secondaryWindowStr := resp.Header.Get("x-codex-secondary-window-minutes")
+	secondaryResetStr := resp.Header.Get("x-codex-secondary-reset-after-seconds")
 
-	// 归一化：找到 7d 窗口（window_minutes > 360 分钟，即 > 6h）
-	var used7dStr string
-	if primaryWindow != "" && secondaryWindow != "" {
-		// 两个都有，大的是 7d
-		pw := parseFloat(primaryWindow)
-		sw := parseFloat(secondaryWindow)
-		if pw >= sw {
-			used7dStr = primaryUsed
-		} else {
-			used7dStr = secondaryUsed
+	type windowData struct {
+		usedPct  float64
+		resetSec float64
+		windowMin float64
+		valid    bool
+	}
+
+	parseWindow := func(usedStr, windowStr, resetStr string) windowData {
+		if usedStr == "" {
+			return windowData{}
 		}
-	} else if primaryUsed != "" {
-		// 只有 primary
-		pw := parseFloat(primaryWindow)
-		if pw > 360 || primaryWindow == "" {
-			used7dStr = primaryUsed // 默认 primary = 7d
-		}
-	} else if secondaryUsed != "" {
-		sw := parseFloat(secondaryWindow)
-		if sw > 360 {
-			used7dStr = secondaryUsed
+		return windowData{
+			usedPct:   parseFloat(usedStr),
+			windowMin: parseFloat(windowStr),
+			resetSec:  parseFloat(resetStr),
+			valid:     true,
 		}
 	}
 
-	if used7dStr != "" {
-		pct := parseFloat(used7dStr)
-		account.SetUsagePercent7d(pct)
-		return pct, true
+	primary := parseWindow(primaryUsedStr, primaryWindowStr, primaryResetStr)
+	secondary := parseWindow(secondaryUsedStr, secondaryWindowStr, secondaryResetStr)
+
+	// 归一化：小窗口 (≤360min) → 5h，大窗口 (>360min) → 7d
+	var w5h, w7d windowData
+	now := time.Now()
+
+	if primary.valid && secondary.valid {
+		if primary.windowMin >= secondary.windowMin {
+			w7d, w5h = primary, secondary
+		} else {
+			w7d, w5h = secondary, primary
+		}
+	} else if primary.valid {
+		if primary.windowMin <= 360 && primary.windowMin > 0 {
+			w5h = primary
+		} else {
+			w7d = primary
+		}
+	} else if secondary.valid {
+		if secondary.windowMin <= 360 && secondary.windowMin > 0 {
+			w5h = secondary
+		} else {
+			w7d = secondary
+		}
+	}
+
+	// 写入 5h
+	if w5h.valid {
+		resetAt := now.Add(time.Duration(w5h.resetSec) * time.Second)
+		account.SetUsageSnapshot5h(w5h.usedPct, resetAt)
+	}
+
+	// 写入 7d
+	if w7d.valid {
+		resetAt := now.Add(time.Duration(w7d.resetSec) * time.Second)
+		account.SetReset7dAt(resetAt)
+		account.SetUsagePercent7d(w7d.usedPct)
+		return w7d.usedPct, true
 	}
 
 	return 0, false

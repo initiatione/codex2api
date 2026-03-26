@@ -1177,12 +1177,24 @@ func (db *DB) UpdateCredentials(ctx context.Context, id int64, credentials map[s
 	return err
 }
 
-// UpdateUsageSnapshot 持久化账号用量快照
+// UpdateUsageSnapshot 持久化账号用量快照（7d + 5h）
 func (db *DB) UpdateUsageSnapshot(ctx context.Context, id int64, pct7d float64, updatedAt time.Time) error {
 	return db.UpdateCredentials(ctx, id, map[string]interface{}{
 		"codex_7d_used_percent":  pct7d,
 		"codex_usage_updated_at": updatedAt.Format(time.RFC3339),
 	})
+}
+
+// UpdateUsageSnapshotFull 持久化完整用量快照（5h + 7d + 重置时间）
+func (db *DB) UpdateUsageSnapshotFull(ctx context.Context, id int64, pct7d float64, reset7dAt time.Time, pct5h float64, reset5hAt time.Time, updatedAt time.Time) error {
+	fields := map[string]interface{}{
+		"codex_7d_used_percent":  pct7d,
+		"codex_7d_reset_at":     reset7dAt.Format(time.RFC3339),
+		"codex_5h_used_percent":  pct5h,
+		"codex_5h_reset_at":     reset5hAt.Format(time.RFC3339),
+		"codex_usage_updated_at": updatedAt.Format(time.RFC3339),
+	}
+	return db.UpdateCredentials(ctx, id, fields)
 }
 
 // SetError 标记账号错误状态
