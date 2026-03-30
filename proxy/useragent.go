@@ -21,6 +21,20 @@ type ClientProfile struct {
 	Version   string // codex CLI 版本（需与 UA 中的版本一致）
 }
 
+const (
+	// StableCodexUserAgent 对齐 CLIProxyAPI 的 Codex 默认指纹。
+	StableCodexUserAgent = "codex_cli_rs/0.116.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	StableCodexVersion   = "0.116.0"
+)
+
+// StableCodexClientProfile 返回稳定的 Codex 客户端画像。
+func StableCodexClientProfile() ClientProfile {
+	return ClientProfile{
+		UserAgent: StableCodexUserAgent,
+		Version:   StableCodexVersion,
+	}
+}
+
 // 预定义的真实客户端画像池
 // 按开发者常见环境分布：macOS（主力） > Linux > Windows
 var clientProfiles = []ClientProfile{

@@ -150,9 +150,10 @@ func main() {
 	r.Use(security.RequestSizeLimiter(security.MaxRequestBodySize))
 
 	// handler 不再接收 cfg.APIKeys
-	// 从环境变量读取设备指纹配置（后续可从数据库配置）
-	deviceCfg := &proxy.DeviceProfileConfig{
-		StabilizeDeviceProfile: os.Getenv("STABILIZE_DEVICE_PROFILE") == "true",
+	// 设备指纹默认走稳定模式，必要时可通过环境变量显式关闭。
+	deviceCfg := proxy.DefaultDeviceProfileConfig()
+	if raw, ok := os.LookupEnv("STABILIZE_DEVICE_PROFILE"); ok {
+		deviceCfg.StabilizeDeviceProfile = strings.EqualFold(strings.TrimSpace(raw), "true")
 	}
 	handler := proxy.NewHandler(store, db, cfg, deviceCfg)
 

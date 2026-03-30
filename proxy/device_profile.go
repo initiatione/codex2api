@@ -42,6 +42,20 @@ type DeviceProfileConfig struct {
 	StabilizeDeviceProfile bool
 }
 
+// DefaultDeviceProfileConfig 返回默认设备指纹配置。
+// 默认启用稳定化，并使用与 CLIProxyAPI 对齐的稳定 UA/版本。
+func DefaultDeviceProfileConfig() *DeviceProfileConfig {
+	stable := StableCodexClientProfile()
+	return &DeviceProfileConfig{
+		UserAgent:              stable.UserAgent,
+		PackageVersion:         stable.Version,
+		RuntimeVersion:         stable.Version,
+		OS:                     defaultDeviceProfileOS,
+		Arch:                   defaultDeviceProfileArch,
+		StabilizeDeviceProfile: true,
+	}
+}
+
 // CLIVersion 表示 Codex CLI 版本
 type cliVersion struct {
 	major int

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -107,7 +108,7 @@ func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
 		return entry.client
 	}
 
-	transport := NewUTLSTransport(proxyURL)
+	transport := newProxyAwareTransport(proxyURL)
 
 	entry := &poolEntry{
 		client: &http.Client{
@@ -123,6 +124,27 @@ func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
 		return e.client
 	}
 	return entry.client
+}
+
+func cloneDefaultTransport() *http.Transport {
+	if base, ok := http.DefaultTransport.(*http.Transport); ok && base != nil {
+		return base.Clone()
+	}
+	return &http.Transport{}
+}
+
+// newProxyAwareTransport 使用与 CLIProxyAPI 一致的 Go 原生 HTTP transport。
+// 这样请求侧 TLS/HTTP 行为更接近官方 CLI 的常规客户端栈，减少额外指纹差异。
+func newProxyAwareTransport(proxyURL string) *http.Transport {
+	transport := cloneDefaultTransport()
+	// 默认禁用环境变量代理，避免与账号/代理池配置冲突。
+	transport.Proxy = nil
+	transport.ForceAttemptHTTP2 = true
+	if err := auth.ConfigureTransportProxy(transport, proxyURL, nil); err != nil {
+		log.Printf("配置上游代理失败，回退直连: %v", err)
+		transport.Proxy = nil
+	}
+	return transport
 }
 
 // Codex 上游常量
@@ -192,38 +214,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		return nil, ErrInternalError("创建请求失败", err)
 	}
 
-	// ==================== 请求头（伪装 Codex CLI） ====================
-	// 应用设备指纹稳定化
-	if IsDeviceProfileStabilizationEnabled(deviceCfg) {
-		profile := ResolveDeviceProfile(account, apiKey, headers, deviceCfg)
-		ApplyDeviceProfileHeaders(req, profile)
-		// 稳定化时也需要设置 Version 头，保持行为一致
-		if profile.HasVersion {
-			req.Header.Set("Version", fmt.Sprintf("%d.%d.%d", profile.Version.major, profile.Version.minor, profile.Version.patch))
-		}
-	} else {
-		// 每个账号使用确定性的 ClientProfile（UA + Version），模拟真实用户多样性
-		profile := ProfileForAccount(account.ID())
-		req.Header.Set("User-Agent", profile.UserAgent)
-		req.Header.Set("Version", profile.Version)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Originator", Originator)
-	req.Header.Set("Connection", "Keep-Alive")
-	if accountID != "" {
-		req.Header.Set("Chatgpt-Account-Id", accountID)
-	}
-
-	// Session/Conversation 头（用于 prompt cache 绑定）
-	// 参考 CLIProxyAPI: req.Header.Set("Conversation_id", cache.ID)
-	// 参考 sub2api: headers.Set("session_id", sessionResolution.SessionID)
-	if cacheKey != "" {
-		req.Header.Set("Session_id", cacheKey)
-		req.Header.Set("Conversation_id", cacheKey)
-	}
+	// ==================== 请求头（对齐 CLIProxyAPI 的稳定策略） ====================
+	identity := resolveCodexRequestIdentity(account, apiKey, headers, deviceCfg)
+	applyCodexRequestHeaders(req, accessToken, accountID, cacheKey, identity, true, headers)
 
 	// 获取连接池 HTTP 客户端（账号级隔离，复用 TCP/TLS 连接）
 	client := getPooledClient(account, proxyURL)

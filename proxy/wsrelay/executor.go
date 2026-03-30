@@ -8,12 +8,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -168,16 +168,15 @@ func (e *Executor) prepareWebsocketHeaders(accessToken, accountID string) http.H
 	// Beta header 启用 WebSocket 响应 API
 	headers.Set("OpenAI-Beta", responsesWebsocketBetaHeader)
 
-	// User-Agent 和版本
-	var accountIDInt int64
-	if accountID != "" {
-		if id, err := strconv.ParseInt(accountID, 10, 64); err == nil {
-			accountIDInt = id
-		}
-	}
-	profile := proxy.ProfileForAccount(accountIDInt)
+	// 对齐 CLIProxyAPI：使用稳定 UA/Version，并补齐关键会话头。
+	profile := proxy.StableCodexClientProfile()
 	headers.Set("User-Agent", profile.UserAgent)
 	headers.Set("Version", profile.Version)
+	headers.Set("Session_id", uuid.NewString())
+	headers.Set("X-Client-Request-Id", uuid.NewString())
+	headers.Set("X-Codex-Turn-Metadata", "")
+	headers.Set("X-Codex-Turn-State", "")
+	headers.Set("X-Responsesapi-Include-Timing-Metrics", "")
 
 	// Originator
 	headers.Set("Originator", proxy.Originator)

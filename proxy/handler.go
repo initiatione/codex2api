@@ -474,9 +474,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		// 使用注入的设备指纹配置
 		deviceCfg := h.deviceCfg
 		if deviceCfg == nil {
-			deviceCfg = &DeviceProfileConfig{
-				StabilizeDeviceProfile: false, // 默认关闭
-			}
+			deviceCfg = DefaultDeviceProfileConfig()
 		}
 
 		// 透传下游请求头用于指纹学习
@@ -840,9 +838,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		// 使用注入的设备指纹配置
 		deviceCfg := h.deviceCfg
 		if deviceCfg == nil {
-			deviceCfg = &DeviceProfileConfig{
-				StabilizeDeviceProfile: false, // 默认关闭
-			}
+			deviceCfg = DefaultDeviceProfileConfig()
 		}
 
 		// 透传下游请求头用于指纹学习
