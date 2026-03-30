@@ -476,7 +476,7 @@
     "autoCleanUnauthorized": "自动清理 401 账号",
     "autoCleanUnauthorizedDesc": "开启后，后台每 30 秒巡检一次，发现运行时为 unauthorized 的账号会自动从号池中清理。",
     "autoCleanRateLimited": "自动清理 429 账号",
-    "autoCleanRateLimitedDesc": "开启后，后台每 30 秒巡检一次，发现运行时为 rate_limited 的账号会自动从号池中清理。",
+    "autoCleanRateLimitedDesc": "开启后，后台每 30 秒巡检一次，发现运行时为 rate_limited 的账号会进入等待模式（至少冷却 4 小时），不会参与调度轮询。",
     "autoCleanFullUsage": "自动清理用量满账号",
     "autoCleanFullUsageModeOff": "关闭",
     "autoCleanFullUsageModeDelete": "删除模式",

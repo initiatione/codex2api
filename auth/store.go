@@ -1697,22 +1697,67 @@ func (s *Store) runAutoCleanupSweep(ctx context.Context) {
 	defer cancel()
 
 	cleanedUnauthorized := 0
-	cleanedRateLimited := 0
+	waitedRateLimited := 0
 	cleanedError := 0
 
 	if s.GetAutoCleanUnauthorized() {
 		cleanedUnauthorized = s.CleanByRuntimeStatus(cleanupCtx, "unauthorized")
 	}
 	if s.GetAutoCleanRateLimited() {
-		cleanedRateLimited = s.CleanByRuntimeStatus(cleanupCtx, "rate_limited")
+		// 429 自动处理改为“等待模式”：不删除账号，只延长冷却，避免继续进入调度轮询
+		waitedRateLimited = s.WaitRateLimitedAccounts(cleanupCtx, 4*time.Hour)
 	}
 	if s.GetAutoCleanError() {
 		cleanedError = s.CleanByRuntimeStatus(cleanupCtx, "error")
 	}
 
-	if cleanedUnauthorized > 0 || cleanedRateLimited > 0 || cleanedError > 0 {
-		log.Printf("自动清理完成: unauthorized=%d, rate_limited=%d, error=%d", cleanedUnauthorized, cleanedRateLimited, cleanedError)
+	if cleanedUnauthorized > 0 || waitedRateLimited > 0 || cleanedError > 0 {
+		log.Printf("自动清理完成: unauthorized=%d, rate_limited_wait=%d, error=%d", cleanedUnauthorized, waitedRateLimited, cleanedError)
 	}
+}
+
+// WaitRateLimitedAccounts 对 rate_limited 账号应用等待模式（不删除）
+func (s *Store) WaitRateLimitedAccounts(ctx context.Context, minWait time.Duration) int {
+	accounts := s.Accounts()
+	waited := 0
+	now := time.Now()
+
+	for _, acc := range accounts {
+		select {
+		case <-ctx.Done():
+			return waited
+		default:
+		}
+		if acc == nil || acc.RuntimeStatus() != "rate_limited" {
+			continue
+		}
+
+		// 跳过正在处理请求的账号，避免中断已有请求
+		if atomic.LoadInt64(&acc.ActiveRequests) > 0 {
+			continue
+		}
+
+		waitDuration := minWait
+		acc.mu.RLock()
+		if acc.Status == StatusCooldown && now.Before(acc.CooldownUtil) {
+			remaining := time.Until(acc.CooldownUtil)
+			if remaining > waitDuration {
+				waitDuration = remaining
+			}
+		}
+		acc.mu.RUnlock()
+		if waitDuration < time.Minute {
+			waitDuration = time.Minute
+		}
+
+		s.MarkCooldown(acc, waitDuration, "rate_limited")
+		if s.db != nil {
+			s.db.InsertAccountEventAsync(acc.DBID, "cooldown", "auto_wait_429")
+		}
+		waited++
+	}
+
+	return waited
 }
 
 // WaitFullUsageAccounts 将用量 >= 100% 的账号切换为等待模式（冷却到重置时间）

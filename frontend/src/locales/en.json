@@ -471,7 +471,7 @@
     "autoCleanUnauthorized": "Auto clean 401 accounts",
     "autoCleanUnauthorizedDesc": "Checks every 30 seconds and removes accounts with unauthorized status.",
     "autoCleanRateLimited": "Auto clean 429 accounts",
-    "autoCleanRateLimitedDesc": "Checks every 30 seconds and removes accounts with rate_limited status.",
+    "autoCleanRateLimitedDesc": "Checks every 30 seconds and puts rate_limited accounts into wait mode (at least 4h cooldown) so they are excluded from scheduler rotation.",
     "autoCleanFullUsage": "Auto clean full-usage accounts",
     "autoCleanFullUsageModeOff": "Off",
     "autoCleanFullUsageModeDelete": "Delete mode",
