@@ -28,7 +28,7 @@ type Handler struct {
 	store      *auth.Store
 	configKeys map[string]bool // 配置文件中的静态 key
 	db         *database.DB
-	cfg        *config.Config  // 全局配置
+	cfg        *config.Config       // 全局配置
 	deviceCfg  *DeviceProfileConfig // 设备指纹配置
 
 	// 动态 key 缓存
@@ -292,6 +292,33 @@ func isRetryableStatus(code int) bool {
 	return code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable || code == http.StatusUnauthorized || code == http.StatusInternalServerError
 }
 
+func isPermanentUnauthorizedError(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	msg := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	if code == "no_organization" || code == "organization_required" {
+		return true
+	}
+	return strings.Contains(msg, "member of an organization")
+}
+
+func (h *Handler) forceDeleteAccount(accountID int64, source string) {
+	if accountID == 0 {
+		return
+	}
+	if h.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = h.db.SetError(ctx, accountID, "deleted")
+		cancel()
+		h.db.InsertAccountEventAsync(accountID, "deleted", source)
+	}
+	if h.store != nil {
+		h.store.RemoveAccount(accountID)
+	}
+}
+
 func parseUsageLimitDetails(body []byte) (usageLimitDetails, bool) {
 	if len(body) == 0 {
 		return usageLimitDetails{}, false
@@ -417,7 +444,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			// 排队等待可用账号（最多 30s）
 			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
 			if account == nil {
-				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
+				if lastStatusCode != 0 && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
 				}
@@ -495,10 +522,14 @@ func (h *Handler) Responses(c *gin.Context) {
 				ServiceTier:      serviceTier,
 			})
 			h.applyCooldown(account, resp.StatusCode, errBody, resp)
+			lastStatusCode = resp.StatusCode
+			lastBody = errBody
+			if resp.StatusCode == http.StatusUnauthorized && isPermanentUnauthorizedError(errBody) {
+				log.Printf("账号 %d 返回永久 401(no_organization)，已从账号池剔除", account.ID())
+				h.forceDeleteAccount(account.ID(), "auto_clean_no_organization")
+			}
 
 			if isRetryableStatus(resp.StatusCode) && attempt < maxRetries {
-				lastStatusCode = resp.StatusCode
-				lastBody = errBody
 				continue
 			}
 
@@ -779,7 +810,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			// 排队等待可用账号（最多 30s）
 			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
 			if account == nil {
-				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
+				if lastStatusCode != 0 && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
 				}
@@ -857,10 +888,14 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				ServiceTier:      serviceTier,
 			})
 			h.applyCooldown(account, resp.StatusCode, errBody, resp)
+			lastStatusCode = resp.StatusCode
+			lastBody = errBody
+			if resp.StatusCode == http.StatusUnauthorized && isPermanentUnauthorizedError(errBody) {
+				log.Printf("账号 %d 返回永久 401(no_organization)，已从账号池剔除", account.ID())
+				h.forceDeleteAccount(account.ID(), "auto_clean_no_organization")
+			}
 
 			if isRetryableStatus(resp.StatusCode) && attempt < maxRetries {
-				lastStatusCode = resp.StatusCode
-				lastBody = errBody
 				continue
 			}
 
