@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -746,7 +747,7 @@ func (h *Handler) importAccountsJSON(c *gin.Context, proxyURL string) {
 
 // importEvent SSE 导入进度事件
 type importEvent struct {
-	Type      string `json:"type"`                // progress | complete
+	Type      string `json:"type"` // progress | complete
 	Current   int    `json:"current"`
 	Total     int    `json:"total"`
 	Success   int    `json:"success"`
@@ -1874,6 +1875,7 @@ func (h *Handler) MigrateAccounts(c *gin.Context) {
 		return
 	}
 	httpReq.Header.Set("X-Admin-Key", req.AdminKey)
+	httpReq.Header.Set("Authorization", "Bearer "+req.AdminKey)
 
 	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(httpReq)
 	if err != nil {
@@ -1882,14 +1884,21 @@ func (h *Handler) MigrateAccounts(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		if ok, errClip := h.tryCliproxyMigration(c, remoteURL, req.AdminKey); ok {
+			if errClip == nil {
+				return
+			}
+			writeError(c, http.StatusBadGateway, fmt.Sprintf("远程实例返回错误 (%d): %s; cliproxy 迁移失败: %v", resp.StatusCode, string(body), errClip))
+			return
+		}
 		writeError(c, http.StatusBadGateway, fmt.Sprintf("远程实例返回错误 (%d): %s", resp.StatusCode, string(body)))
 		return
 	}
 
 	var remoteAccounts []cpaExportEntry
-	if err := json.NewDecoder(resp.Body).Decode(&remoteAccounts); err != nil {
+	if err := json.Unmarshal(body, &remoteAccounts); err != nil {
 		writeError(c, http.StatusBadGateway, "解析远程数据失败: "+err.Error())
 		return
 	}
@@ -1915,6 +1924,283 @@ func (h *Handler) MigrateAccounts(c *gin.Context) {
 
 	log.Printf("远程迁移: 从 %s 拉取到 %d 个账号，开始导入", remoteURL, len(tokens))
 	h.importAccountsCommon(c, tokens, "")
+}
+
+type compatImportItem struct {
+	name  string
+	entry compatEntry
+}
+
+func (h *Handler) tryCliproxyMigration(c *gin.Context, remoteURL, adminKey string) (bool, error) {
+	listURL := remoteURL + "/v0/management/auth-files"
+	fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer fetchCancel()
+
+	listReq, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, listURL, nil)
+	if err != nil {
+		return true, fmt.Errorf("构建 cliproxy 请求失败: %w", err)
+	}
+	setCliproxyHeaders(listReq, adminKey)
+
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(listReq)
+	if err != nil {
+		return true, fmt.Errorf("连接 cliproxy 失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return true, fmt.Errorf("cliproxy 返回错误 (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var listResp struct {
+		Files []map[string]interface{} `json:"files"`
+	}
+	if err := json.Unmarshal(body, &listResp); err != nil {
+		return true, fmt.Errorf("解析 cliproxy 列表失败: %w", err)
+	}
+	if len(listResp.Files) == 0 {
+		c.JSON(http.StatusOK, gin.H{"message": "cliproxy 没有可迁移账号", "total": 0, "imported": 0, "duplicate": 0, "failed": 0})
+		return true, nil
+	}
+
+	items := make([]compatImportItem, 0)
+	skipped := 0
+	for _, file := range listResp.Files {
+		if !isCliproxyCodexEntry(file) {
+			continue
+		}
+		name := cliproxyFileName(file)
+		if name == "" {
+			skipped++
+			continue
+		}
+
+		downloadURL := remoteURL + "/v0/management/auth-files/download?name=" + url.QueryEscape(name)
+		fileReq, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, downloadURL, nil)
+		if err != nil {
+			skipped++
+			continue
+		}
+		setCliproxyHeaders(fileReq, adminKey)
+
+		fileResp, err := (&http.Client{Timeout: 60 * time.Second}).Do(fileReq)
+		if err != nil {
+			skipped++
+			continue
+		}
+		data, _ := io.ReadAll(fileResp.Body)
+		fileResp.Body.Close()
+
+		if fileResp.StatusCode != http.StatusOK {
+			skipped++
+			continue
+		}
+
+		entries, err := parseCompatEntries(data)
+		if err != nil {
+			skipped++
+			continue
+		}
+		for idx, entry := range entries {
+			parsed := parseCompatEntry(entry)
+			if parsed.refreshToken == "" && parsed.accessToken == "" {
+				continue
+			}
+			itemName := buildCompatName(name, parsed.email, idx, len(entries))
+			items = append(items, compatImportItem{name: itemName, entry: parsed})
+		}
+	}
+
+	if len(items) == 0 {
+		return true, fmt.Errorf("cliproxy 没有可迁移账号 (已跳过 %d 个文件)", skipped)
+	}
+
+	log.Printf("远程迁移(cliproxy): 从 %s 拉取到 %d 个账号，开始导入", remoteURL, len(items))
+	h.importCompatAccountsCommon(c, items)
+	return true, nil
+}
+
+func setCliproxyHeaders(req *http.Request, adminKey string) {
+	if req == nil {
+		return
+	}
+	if adminKey != "" {
+		req.Header.Set("Authorization", "Bearer "+adminKey)
+		req.Header.Set("X-Management-Key", adminKey)
+	}
+}
+
+func cliproxyFileName(entry map[string]interface{}) string {
+	name := strings.TrimSpace(compatString(entry, "name", "label", "account", "id"))
+	if name == "" {
+		return ""
+	}
+	lower := strings.ToLower(name)
+	if !strings.HasSuffix(lower, ".json") {
+		name = name + ".json"
+	}
+	return name
+}
+
+func isCliproxyCodexEntry(entry map[string]interface{}) bool {
+	provider := strings.ToLower(strings.TrimSpace(compatString(entry, "provider")))
+	typ := strings.ToLower(strings.TrimSpace(compatString(entry, "type")))
+	if provider != "" && !strings.Contains(provider, "codex") {
+		return false
+	}
+	if typ != "" && !strings.Contains(typ, "codex") {
+		return false
+	}
+	return true
+}
+
+func (h *Handler) importCompatAccountsCommon(c *gin.Context, items []compatImportItem) {
+	seenRT := make(map[string]bool)
+	seenAT := make(map[string]bool)
+	var unique []compatImportItem
+	for _, item := range items {
+		rt := strings.TrimSpace(item.entry.refreshToken)
+		at := strings.TrimSpace(item.entry.accessToken)
+		if rt == "" && at == "" {
+			continue
+		}
+		if rt != "" {
+			if seenRT[rt] {
+				continue
+			}
+			seenRT[rt] = true
+		} else if at != "" {
+			if seenAT[at] {
+				continue
+			}
+			seenAT[at] = true
+		}
+		unique = append(unique, item)
+	}
+
+	total := len(unique)
+	if total == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message":   "没有可迁移账号",
+			"success":   0,
+			"duplicate": 0,
+			"failed":    0,
+			"total":     0,
+		})
+		return
+	}
+
+	dedupeCtx, dedupeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dedupeCancel()
+	existingRTs, err := h.db.GetAllRefreshTokens(dedupeCtx)
+	if err != nil {
+		log.Printf("查询已有 RT 失败: %v", err)
+		existingRTs = make(map[string]bool)
+	}
+	existingATs, err := h.db.GetAllAccessTokens(dedupeCtx)
+	if err != nil {
+		log.Printf("查询已有 AT 失败: %v", err)
+		existingATs = make(map[string]bool)
+	}
+
+	var newItems []compatImportItem
+	duplicateCount := 0
+	for _, item := range unique {
+		rt := strings.TrimSpace(item.entry.refreshToken)
+		at := strings.TrimSpace(item.entry.accessToken)
+		if rt != "" {
+			if existingRTs[rt] {
+				duplicateCount++
+				continue
+			}
+		} else if at != "" {
+			if existingATs[at] {
+				duplicateCount++
+				continue
+			}
+		}
+		newItems = append(newItems, item)
+	}
+
+	if len(newItems) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message":   fmt.Sprintf("所有 %d 个账号已存在，无需导入", total),
+			"success":   0,
+			"duplicate": duplicateCount,
+			"failed":    0,
+			"total":     total,
+		})
+		return
+	}
+
+	setupSSE(c)
+
+	var successCount int64
+	var failCount int64
+	var current int64
+	sem := make(chan struct{}, 20)
+	var wg sync.WaitGroup
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cur := int(atomic.LoadInt64(&current))
+				suc := int(atomic.LoadInt64(&successCount))
+				fai := int(atomic.LoadInt64(&failCount))
+				sendImportEvent(c, importEvent{
+					Type: "progress", Current: cur + duplicateCount, Total: total,
+					Success: suc, Duplicate: duplicateCount, Failed: fai,
+				})
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	for i, item := range newItems {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(idx int, it compatImportItem) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			name := it.name
+			if name == "" {
+				name = fmt.Sprintf("migrate-%d", idx+1)
+			}
+
+			insertCtx, insertCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, err := h.insertCompatAccount(insertCtx, name, it.entry)
+			insertCancel()
+
+			if err != nil {
+				log.Printf("迁移账号 %d/%d 失败: %v", idx+1, len(newItems), err)
+				atomic.AddInt64(&failCount, 1)
+				atomic.AddInt64(&current, 1)
+				return
+			}
+
+			atomic.AddInt64(&successCount, 1)
+			atomic.AddInt64(&current, 1)
+		}(i, item)
+	}
+
+	wg.Wait()
+	close(done)
+
+	suc := int(atomic.LoadInt64(&successCount))
+	fai := int(atomic.LoadInt64(&failCount))
+	sendImportEvent(c, importEvent{
+		Type: "complete", Current: total, Total: total,
+		Success: suc, Duplicate: duplicateCount, Failed: fai,
+	})
+
+	log.Printf("迁移完成(cliproxy): success=%d, duplicate=%d, failed=%d, total=%d", suc, duplicateCount, fai, total)
 }
 
 // ==================== Models ====================
@@ -2201,4 +2487,3 @@ func (h *Handler) TestProxy(c *gin.Context) {
 		"location":   location,
 	})
 }
-
