@@ -154,7 +154,16 @@ const (
 )
 
 // WebsocketExecuteFunc WebSocket 执行函数（由 wsrelay 包在 main.go 中注册，避免循环依赖）
-var WebsocketExecuteFunc func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string) (*http.Response, error)
+var WebsocketExecuteFunc func(
+	ctx context.Context,
+	account *auth.Account,
+	requestBody []byte,
+	sessionID string,
+	proxyOverride string,
+	apiKey string,
+	deviceCfg *DeviceProfileConfig,
+	headers http.Header,
+) (*http.Response, error)
 
 // ExecuteRequest 向 Codex 上游发送请求
 // sessionID 可选，用于 prompt cache 会话绑定
@@ -163,7 +172,12 @@ var WebsocketExecuteFunc func(ctx context.Context, account *auth.Account, reques
 func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (*http.Response, error) {
 	// 检查是否使用 WebSocket
 	if len(useWebsocket) > 0 && useWebsocket[0] && WebsocketExecuteFunc != nil {
-		return WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride)
+		wsResp, wsErr := WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers)
+		if wsErr == nil {
+			return wsResp, nil
+		}
+		// 对齐 CLIProxyAPI 的稳态策略：WebSocket 失败自动回退 HTTP 链路，避免单点失败。
+		log.Printf("WebSocket 上游失败，回退 HTTP: account=%d err=%v", account.ID(), wsErr)
 	}
 
 	if ctx == nil {

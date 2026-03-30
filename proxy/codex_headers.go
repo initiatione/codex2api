@@ -14,6 +14,13 @@ type codexRequestIdentity struct {
 	Version   string
 }
 
+// ResolveCodexHeaderIdentity 解析上游请求需要使用的 UA/Version。
+// 该函数用于在 HTTP 与 WebSocket 两条链路上统一请求身份策略。
+func ResolveCodexHeaderIdentity(account *auth.Account, apiKey string, downstreamHeaders http.Header, deviceCfg *DeviceProfileConfig) (userAgent string, version string) {
+	identity := resolveCodexRequestIdentity(account, apiKey, downstreamHeaders, deviceCfg)
+	return identity.UserAgent, identity.Version
+}
+
 func resolveCodexRequestIdentity(account *auth.Account, apiKey string, downstreamHeaders http.Header, deviceCfg *DeviceProfileConfig) codexRequestIdentity {
 	// 设备稳定化模式：优先使用稳定 profile（并支持从下游 Codex CLI 学习更高版本）。
 	if IsDeviceProfileStabilizationEnabled(deviceCfg) {

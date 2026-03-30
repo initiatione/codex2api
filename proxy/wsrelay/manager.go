@@ -7,12 +7,14 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/gorilla/websocket"
+	xproxy "golang.org/x/net/proxy"
 )
 
 // ==================== 连接池管理器 ====================
@@ -161,6 +163,7 @@ type Manager struct {
 func NewManager() *Manager {
 	m := &Manager{
 		dialer: &websocket.Dialer{
+			Proxy:             http.ProxyFromEnvironment,
 			HandshakeTimeout:  HandshakeTimeout,
 			EnableCompression: true,
 			NetDialContext: (&net.Dialer{
@@ -176,6 +179,53 @@ func NewManager() *Manager {
 	go m.cleanupLoop()
 
 	return m
+}
+
+func applyProxyToWebsocketDialer(dialer *websocket.Dialer, rawProxy string) error {
+	if dialer == nil {
+		return nil
+	}
+	rawProxy = strings.TrimSpace(rawProxy)
+	if rawProxy == "" {
+		return nil
+	}
+
+	switch strings.ToLower(rawProxy) {
+	case "direct", "none":
+		dialer.Proxy = nil
+		return nil
+	}
+
+	parsed, err := url.Parse(rawProxy)
+	if err != nil {
+		return fmt.Errorf("parse proxy URL failed: %w", err)
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+		dialer.Proxy = http.ProxyURL(parsed)
+		return nil
+	case "socks5", "socks5h":
+		var authInfo *xproxy.Auth
+		if parsed.User != nil {
+			password, _ := parsed.User.Password()
+			authInfo = &xproxy.Auth{
+				User:     parsed.User.Username(),
+				Password: password,
+			}
+		}
+		socksDialer, err := xproxy.SOCKS5("tcp", parsed.Host, authInfo, xproxy.Direct)
+		if err != nil {
+			return fmt.Errorf("build socks5 dialer failed: %w", err)
+		}
+		dialer.Proxy = nil
+		dialer.NetDialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
+			return socksDialer.Dial(network, addr)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported proxy scheme: %s", parsed.Scheme)
+	}
 }
 
 // cleanupLoop 定期清理过期连接
@@ -307,8 +357,10 @@ func (m *Manager) createConnection(
 ) (*WsConnection, error) {
 	// 创建拨号器副本（避免修改共享 dialer）
 	dialer := &websocket.Dialer{
+		Proxy:             m.dialer.Proxy,
 		HandshakeTimeout:  m.dialer.HandshakeTimeout,
 		EnableCompression: m.dialer.EnableCompression,
+		NetDialContext:    m.dialer.NetDialContext,
 	}
 
 	// 配置代理
@@ -321,12 +373,8 @@ func (m *Manager) createConnection(
 	}
 
 	if proxyURL != "" {
-		proxyURLParsed, err := url.Parse(proxyURL)
-		if err != nil {
-			return nil, fmt.Errorf("parse proxy URL failed: %w", err)
-		}
-		dialer.Proxy = func(req *http.Request) (*url.URL, error) {
-			return proxyURLParsed, nil
+		if err := applyProxyToWebsocketDialer(dialer, proxyURL); err != nil {
+			return nil, err
 		}
 	}
 
