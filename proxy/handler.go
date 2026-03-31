@@ -232,6 +232,16 @@ func shouldTransparentRetryStream(outcome streamOutcome, attempt int, maxRetries
 	return true
 }
 
+func schedulerLatency(totalDurationMs, firstTokenMs int) time.Duration {
+	if firstTokenMs > 0 {
+		return time.Duration(firstTokenMs) * time.Millisecond
+	}
+	if totalDurationMs > 0 {
+		return time.Duration(totalDurationMs) * time.Millisecond
+	}
+	return 0
+}
+
 // RegisterRoutes 注册路由
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	v1 := r.Group("/v1")
@@ -732,7 +742,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			recyclePooledClientForAccount(account)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 		} else if outcome.logStatusCode == http.StatusOK {
-			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
+			h.store.ReportRequestSuccess(account, schedulerLatency(totalDuration, firstTokenMs))
 		}
 		h.store.Release(account)
 		return
@@ -1136,7 +1146,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			recyclePooledClientForAccount(account)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 		} else if outcome.logStatusCode == http.StatusOK {
-			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
+			h.store.ReportRequestSuccess(account, schedulerLatency(totalDuration, firstTokenMs))
 		}
 		h.store.Release(account)
 		return

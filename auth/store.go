@@ -327,12 +327,14 @@ func (a *Account) schedulerBreakdownLocked() SchedulerBreakdown {
 	}
 
 	switch {
-	case a.LatencyEWMA >= 20000:
-		breakdown.LatencyPenalty = 15
-	case a.LatencyEWMA >= 10000:
-		breakdown.LatencyPenalty = 8
-	case a.LatencyEWMA >= 5000:
-		breakdown.LatencyPenalty = 4
+	case a.LatencyEWMA >= 12000:
+		breakdown.LatencyPenalty = 25
+	case a.LatencyEWMA >= 8000:
+		breakdown.LatencyPenalty = 18
+	case a.LatencyEWMA >= 4000:
+		breakdown.LatencyPenalty = 10
+	case a.LatencyEWMA >= 2500:
+		breakdown.LatencyPenalty = 5
 	}
 
 	return breakdown
@@ -382,6 +384,12 @@ func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
 	a.HealthTier = tier
 	a.SchedulerScore = score
 	a.DynamicConcurrencyLimit = concurrencyLimitForTier(baseLimit, tier)
+	// 高首包延迟账号自动收敛并发，避免把慢账号打得更慢。
+	if a.LatencyEWMA >= 8000 && a.DynamicConcurrencyLimit > 1 {
+		a.DynamicConcurrencyLimit = 1
+	} else if a.LatencyEWMA >= 4000 && a.DynamicConcurrencyLimit > 2 {
+		a.DynamicConcurrencyLimit = 2
+	}
 }
 
 func (a *Account) schedulerSnapshot(baseLimit int64) (AccountHealthTier, float64, int64) {
