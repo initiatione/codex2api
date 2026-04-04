@@ -107,6 +107,28 @@ func clampPercent(value float64) float64 {
 	return value
 }
 
+func settlementAmountForUsage(usagePct, baseline, initial, full float64) float64 {
+	denominator := 100 - baseline
+	if denominator <= 0 {
+		denominator = 1
+	}
+	progress := (usagePct - baseline) / denominator
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 1 {
+		progress = 1
+	}
+	amount := roundUSD(initial + (full-initial)*progress)
+	if amount < initial {
+		amount = initial
+	}
+	if amount > full {
+		amount = full
+	}
+	return amount
+}
+
 func (db *DB) nowExpr() string {
 	if db.isSQLite() {
 		return "CURRENT_TIMESTAMP"
@@ -308,8 +330,21 @@ func (db *DB) BindAccountToPublicKey(ctx context.Context, in PublicSettlementBin
 	return tx.Commit()
 }
 
-// SettlePublicAccountUsage 按账号实时用量百分比进行增量结算
+// SettlePublicAccountUsage 按账号实时用量百分比进行增量结算（兼容旧调用）。
 func (db *DB) SettlePublicAccountUsage(ctx context.Context, accountID int64, usagePercent float64) (*PublicSettlementResult, error) {
+	return db.SettlePublicAccountUsageWithRequestDelta(ctx, accountID, 0, false, usagePercent)
+}
+
+// SettlePublicAccountUsageWithRequestDelta 按单次请求的前后用量差值进行结算。
+// requestBeforeValid=true 时，仅对 [request_before, request_after] 区间进行计费；
+// 这可避免把请求开始前已发生的外部消费计入本次结算。
+func (db *DB) SettlePublicAccountUsageWithRequestDelta(
+	ctx context.Context,
+	accountID int64,
+	requestBeforePercent float64,
+	requestBeforeValid bool,
+	requestAfterPercent float64,
+) (*PublicSettlementResult, error) {
 	if accountID == 0 {
 		return nil, nil
 	}
@@ -349,10 +384,17 @@ func (db *DB) SettlePublicAccountUsage(ctx context.Context, accountID int64, usa
 
 	baseline = clampPercent(baseline)
 	lastUsage = clampPercent(lastUsage)
-	currentUsage := clampPercent(usagePercent)
-	effectiveUsage := math.Max(lastUsage, currentUsage)
-	if effectiveUsage < baseline {
-		effectiveUsage = baseline
+
+	requestAfter := clampPercent(requestAfterPercent)
+	requestBefore := lastUsage
+	if requestBeforeValid {
+		requestBefore = clampPercent(requestBeforePercent)
+	}
+	if requestBefore < baseline {
+		requestBefore = baseline
+	}
+	if requestAfter < requestBefore {
+		requestAfter = requestBefore
 	}
 
 	initial = roundUSD(initial)
@@ -365,27 +407,39 @@ func (db *DB) SettlePublicAccountUsage(ctx context.Context, accountID int64, usa
 		settled = initial
 	}
 
-	denominator := 100 - baseline
-	if denominator <= 0 {
-		denominator = 1
+	// 只结算本请求窗口内增长；如果请求前用量已经高于 last_usage_percent，
+	// 视为外部消费，推进状态但不回补计费。
+	effectiveStart := math.Max(lastUsage, requestBefore)
+	if effectiveStart < baseline {
+		effectiveStart = baseline
 	}
-	progress := (effectiveUsage - baseline) / denominator
-	if progress < 0 {
-		progress = 0
+	effectiveEnd := math.Max(effectiveStart, requestAfter)
+	if effectiveEnd < baseline {
+		effectiveEnd = baseline
 	}
-	if progress > 1 {
-		progress = 1
+
+	startAmount := settlementAmountForUsage(effectiveStart, baseline, initial, full)
+	target := settlementAmountForUsage(effectiveEnd, baseline, initial, full)
+	if target < startAmount {
+		target = startAmount
 	}
-	target := roundUSD(initial + (full-initial)*progress)
+
+	settleBase := settled
+	if startAmount > settleBase {
+		settleBase = startAmount
+	}
+	delta := roundUSD(target - settleBase)
+	if delta < 0 {
+		delta = 0
+	}
+
 	if target < settled {
 		target = settled
 	}
 	if target > full {
 		target = full
 	}
-
-	delta := roundUSD(target - settled)
-	newFinalized := finalized || effectiveUsage >= 100 || target >= full
+	newFinalized := finalized || effectiveEnd >= 100 || target >= full
 
 	updateSettlement := fmt.Sprintf(`
 		UPDATE public_account_settlements
@@ -395,7 +449,7 @@ func (db *DB) SettlePublicAccountUsage(ctx context.Context, accountID int64, usa
 		    updated_at = %s
 		WHERE account_id = $4
 	`, db.nowExpr())
-	if _, err = tx.ExecContext(ctx, updateSettlement, effectiveUsage, target, newFinalized, accountID); err != nil {
+	if _, err = tx.ExecContext(ctx, updateSettlement, effectiveEnd, target, newFinalized, accountID); err != nil {
 		return nil, err
 	}
 
@@ -418,7 +472,7 @@ func (db *DB) SettlePublicAccountUsage(ctx context.Context, accountID int64, usa
 			INSERT INTO public_balance_logs (public_api_key_id, account_id, entry_type, delta_usd, balance_after_usd, note, created_at)
 			VALUES ($1, $2, 'usage_settlement', $3, $4, $5, %s)
 		`, db.nowExpr())
-		note := fmt.Sprintf("usage_percent=%.4f", effectiveUsage)
+		note := fmt.Sprintf("request_before=%.4f request_after=%.4f effective_end=%.4f", requestBefore, requestAfter, effectiveEnd)
 		if _, err = tx.ExecContext(ctx, insertLog, publicKeyID, accountID, delta, balance, note); err != nil {
 			return nil, err
 		}
@@ -435,7 +489,7 @@ func (db *DB) SettlePublicAccountUsage(ctx context.Context, accountID int64, usa
 	return &PublicSettlementResult{
 		AccountID:      accountID,
 		PublicAPIKeyID: publicKeyID,
-		UsagePercent:   effectiveUsage,
+		UsagePercent:   effectiveEnd,
 		DeltaUSD:       delta,
 		SettledAmount:  target,
 		BalanceUSD:     roundUSD(balance),

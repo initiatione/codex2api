@@ -121,7 +121,7 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 	_ = h.db.InsertUsageLog(context.Background(), input)
 }
 
-func (h *Handler) settlePublicAccountUsage(account *auth.Account, usagePct float64) {
+func (h *Handler) settlePublicAccountUsage(account *auth.Account, usageBefore float64, usageBeforeValid bool, usageAfter float64) {
 	if h == nil || h.db == nil || account == nil {
 		return
 	}
@@ -133,8 +133,19 @@ func (h *Handler) settlePublicAccountUsage(account *auth.Account, usagePct float
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, err := h.db.SettlePublicAccountUsage(ctx, account.ID(), usagePct); err != nil {
+	if _, err := h.db.SettlePublicAccountUsageWithRequestDelta(ctx, account.ID(), usageBefore, usageBeforeValid, usageAfter); err != nil {
 		log.Printf("[账号 %d] 公开上传结算失败: %v", account.ID(), err)
+	}
+}
+
+func (h *Handler) persistUsageAndSettleFromResponse(account *auth.Account, resp *http.Response) {
+	if account == nil || resp == nil {
+		return
+	}
+	usageBefore, usageBeforeValid := account.GetUsagePercent7d()
+	if usageAfter, ok := parseCodexUsageHeaders(resp, account); ok {
+		h.store.PersistUsageSnapshot(account, usageAfter)
+		h.settlePublicAccountUsage(account, usageBefore, usageBeforeValid, usageAfter)
 	}
 }
 
@@ -549,10 +560,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
-			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
-				h.store.PersistUsageSnapshot(account, usagePct)
-				h.settlePublicAccountUsage(account, usagePct)
-			}
+			h.persistUsageAndSettleFromResponse(account, resp)
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			h.store.Release(account)
@@ -707,10 +715,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/responses): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClientForAccount(account)
-			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
-				h.store.PersistUsageSnapshot(account, usagePct)
-				h.settlePublicAccountUsage(account, usagePct)
-			}
+			h.persistUsageAndSettleFromResponse(account, resp)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			resp.Body.Close()
 			h.store.Release(account)
@@ -773,10 +778,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		h.logUsage(logInput)
 
 		resp.Body.Close()
-		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
-			h.store.PersistUsageSnapshot(account, usagePct)
-			h.settlePublicAccountUsage(account, usagePct)
-		}
+		h.persistUsageAndSettleFromResponse(account, resp)
 		if outcome.penalize {
 			recyclePooledClientForAccount(account)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
@@ -918,10 +920,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
-			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
-				h.store.PersistUsageSnapshot(account, usagePct)
-				h.settlePublicAccountUsage(account, usagePct)
-			}
+			h.persistUsageAndSettleFromResponse(account, resp)
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			h.store.Release(account)
@@ -1116,10 +1115,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/chat/completions): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClientForAccount(account)
-			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
-				h.store.PersistUsageSnapshot(account, usagePct)
-				h.settlePublicAccountUsage(account, usagePct)
-			}
+			h.persistUsageAndSettleFromResponse(account, resp)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			resp.Body.Close()
 			h.store.Release(account)
@@ -1182,10 +1178,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		h.logUsage(logInput)
 
 		resp.Body.Close()
-		if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
-			h.store.PersistUsageSnapshot(account, usagePct)
-			h.settlePublicAccountUsage(account, usagePct)
-		}
+		h.persistUsageAndSettleFromResponse(account, resp)
 		if outcome.penalize {
 			recyclePooledClientForAccount(account)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)

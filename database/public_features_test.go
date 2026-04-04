@@ -91,6 +91,60 @@ func TestPublicSettlementFlow(t *testing.T) {
 	}
 }
 
+func TestPublicSettlementUsesRequestDeltaOnly(t *testing.T) {
+	ctx := context.Background()
+	db := newSQLiteDBForPublicFeatureTest(t)
+
+	keyID, err := db.InsertPublicAPIKeyWithMeta(ctx, "pub", "pk-settle-test-jump-1234567890", "public_generate", "1.2.3.4", 0)
+	if err != nil {
+		t.Fatalf("insert public key: %v", err)
+	}
+
+	accountID, err := db.InsertATAccount(ctx, "acc-jump", "at-token-jump", "")
+	if err != nil {
+		t.Fatalf("insert account: %v", err)
+	}
+
+	if err = db.BindAccountToPublicKey(ctx, PublicSettlementBindInput{
+		AccountID:            accountID,
+		PublicAPIKeyID:       keyID,
+		BaselineUsagePercent: 0,
+		InitialAmountUSD:     0.1,
+		FullAmountUSD:        2.0,
+	}); err != nil {
+		t.Fatalf("bind account to public key: %v", err)
+	}
+
+	r1, err := db.SettlePublicAccountUsageWithRequestDelta(ctx, accountID, 0, true, 5)
+	if err != nil {
+		t.Fatalf("settle usage 5%%: %v", err)
+	}
+	if r1 == nil {
+		t.Fatalf("settle usage 5%%: nil result")
+	}
+	if !almostEqual(r1.DeltaUSD, 0.095) {
+		t.Fatalf("delta(5%%) = %.4f, want 0.095", r1.DeltaUSD)
+	}
+	if !almostEqual(r1.BalanceUSD, 0.195) {
+		t.Fatalf("balance(5%%) = %.4f, want 0.195", r1.BalanceUSD)
+	}
+
+	// 模拟请求开始前账号已被外部消耗到 85%，本次请求只从 85% -> 87%。
+	r2, err := db.SettlePublicAccountUsageWithRequestDelta(ctx, accountID, 85, true, 87)
+	if err != nil {
+		t.Fatalf("settle usage 85%%->87%%: %v", err)
+	}
+	if r2 == nil {
+		t.Fatalf("settle usage 85%%->87%%: nil result")
+	}
+	if !almostEqual(r2.DeltaUSD, 0.038) {
+		t.Fatalf("delta(85%%->87%%) = %.4f, want 0.038", r2.DeltaUSD)
+	}
+	if !almostEqual(r2.BalanceUSD, 0.233) {
+		t.Fatalf("balance(85%%->87%%) = %.4f, want 0.233", r2.BalanceUSD)
+	}
+}
+
 func TestRedeemByPublicKeyNearestLower(t *testing.T) {
 	ctx := context.Background()
 	db := newSQLiteDBForPublicFeatureTest(t)
