@@ -25,11 +25,68 @@ import (
 // RegisterCliproxyRoutes registers minimal CLIProxyAPI-compatible management routes.
 func (h *Handler) RegisterCliproxyRoutes(r *gin.Engine) {
 	group := r.Group("/v0/management")
-	group.Use(h.adminAuthMiddleware())
-	group.GET("/auth-files", h.ListAuthFilesCompat)
-	group.POST("/auth-files", h.UploadAuthFilesCompat)
-	group.DELETE("/auth-files", h.DeleteAuthFilesCompat)
-	group.POST("/api-call", h.ManagementAPICallCompat)
+	group.GET("/auth-files", h.adminAuthMiddleware(), h.ListAuthFilesCompat)
+	group.POST("/auth-files", h.cliproxyUploadAuthMiddleware(), h.UploadAuthFilesCompat)
+	group.DELETE("/auth-files", h.adminAuthMiddleware(), h.DeleteAuthFilesCompat)
+	group.POST("/api-call", h.adminAuthMiddleware(), h.ManagementAPICallCompat)
+}
+
+// cliproxyUploadAuthMiddleware only accepts public upload keys for one-way upload.
+func (h *Handler) cliproxyUploadAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		extractKey := func() string {
+			candidates := []string{
+				c.GetHeader("X-Public-Key"),
+			}
+			for _, candidate := range candidates {
+				key := strings.TrimSpace(security.SanitizeInput(candidate))
+				if key != "" {
+					return key
+				}
+			}
+			authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				return strings.TrimSpace(security.SanitizeInput(strings.TrimPrefix(authHeader, "Bearer ")))
+			}
+			return ""
+		}
+
+		providedKey := extractKey()
+
+		readCtx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+		defer cancel()
+		publicKeys, err := h.db.GetAllPublicAPIKeyValues(readCtx)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "读取公开密钥失败")
+			c.Abort()
+			return
+		}
+
+		// 明确安全边界：未配置公开密钥时，公开上传接口直接拒绝请求。
+		if len(publicKeys) == 0 {
+			writeError(c, http.StatusForbidden, "未配置公开上传密钥")
+			c.Abort()
+			return
+		}
+
+		// 公开密钥限定为 pk- 前缀，避免与管理密钥/业务 API Key 混用。
+		if providedKey == "" || !strings.HasPrefix(providedKey, "pk-") {
+			writeError(c, http.StatusUnauthorized, "公开上传密钥无效或缺失")
+			c.Abort()
+			return
+		}
+
+		for _, key := range publicKeys {
+			if security.SecureCompare(providedKey, key) {
+				c.Next()
+				return
+			}
+		}
+
+		security.SecurityAuditLog("PUBLIC_UPLOAD_AUTH_FAILED", fmt.Sprintf("path=%s ip=%s", c.Request.URL.Path, c.ClientIP()))
+		writeError(c, http.StatusUnauthorized, "公开上传密钥无效或缺失")
+		c.Abort()
+	}
 }
 
 // ListAuthFilesCompat returns a CLIProxyAPI-style auth files list backed by codex2api accounts.

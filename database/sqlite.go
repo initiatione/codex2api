@@ -66,6 +66,12 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			key TEXT NOT NULL UNIQUE,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS public_api_keys (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT DEFAULT '',
+			key TEXT NOT NULL UNIQUE,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
 		`CREATE TABLE IF NOT EXISTS system_settings (
 			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
 			max_concurrency INTEGER DEFAULT 2,

@@ -108,6 +108,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/keys", h.ListAPIKeys)
 	api.POST("/keys", h.CreateAPIKey)
 	api.DELETE("/keys/:id", h.DeleteAPIKey)
+	api.GET("/pubkeys", h.ListPublicAPIKeys)
+	api.POST("/pubkeys", h.CreatePublicAPIKey)
+	api.DELETE("/pubkeys/:id", h.DeletePublicAPIKey)
 	api.GET("/health", h.GetHealth)
 	api.GET("/ops/overview", h.GetOpsOverview)
 	api.GET("/settings", h.GetSettings)
@@ -1679,11 +1682,20 @@ type createKeyReq struct {
 	Key  string `json:"key"`
 }
 
-// generateKey 生成随机 API Key
-func generateKey() string {
+func generateKeyWithPrefix(prefix string) string {
 	b := make([]byte, 24)
 	rand.Read(b)
-	return "sk-" + hex.EncodeToString(b)
+	return prefix + hex.EncodeToString(b)
+}
+
+// generateKey 生成随机 API Key
+func generateKey() string {
+	return generateKeyWithPrefix("sk-")
+}
+
+// generatePublicKey 生成公开上传 API Key
+func generatePublicKey() string {
+	return generateKeyWithPrefix("pk-")
 }
 
 // CreateAPIKey 创建新 API 密钥（增强版，带输入验证）
@@ -1754,6 +1766,96 @@ func (h *Handler) DeleteAPIKey(c *gin.Context) {
 	defer cancel()
 
 	if err := h.db.DeleteAPIKey(ctx, id); err != nil {
+		writeError(c, http.StatusInternalServerError, "删除失败: "+err.Error())
+		return
+	}
+	writeMessage(c, http.StatusOK, "已删除")
+}
+
+// ListPublicAPIKeys 获取所有公开上传 API 密钥（脱敏版本）
+func (h *Handler) ListPublicAPIKeys(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	keys, err := h.db.ListPublicAPIKeys(ctx)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+
+	maskedKeys := make([]*MaskedAPIKeyRow, 0, len(keys))
+	for _, k := range keys {
+		maskedKeys = append(maskedKeys, NewMaskedAPIKeyRow(k))
+	}
+
+	c.JSON(http.StatusOK, apiKeysResponse{Keys: maskedKeys})
+}
+
+// CreatePublicAPIKey 创建公开上传 API 密钥
+func (h *Handler) CreatePublicAPIKey(c *gin.Context) {
+	var req createKeyReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		req.Name = ""
+	}
+
+	req.Name = security.SanitizeInput(req.Name)
+	if req.Name == "" {
+		req.Name = "public-upload"
+	}
+	if utf8.RuneCountInString(req.Name) > 100 {
+		writeError(c, http.StatusBadRequest, "名称长度不能超过100字符")
+		return
+	}
+	if security.ContainsXSS(req.Name) {
+		writeError(c, http.StatusBadRequest, "名称包含非法字符")
+		return
+	}
+
+	key := req.Key
+	if key == "" {
+		key = generatePublicKey()
+	} else {
+		key = security.SanitizeInput(key)
+		if !strings.HasPrefix(key, "pk-") || len(key) < 20 {
+			writeError(c, http.StatusBadRequest, "API Key格式无效")
+			return
+		}
+	}
+	if adminSecret, _ := h.resolveAdminSecret(c.Request.Context()); adminSecret != "" && security.SecureCompare(key, adminSecret) {
+		writeError(c, http.StatusBadRequest, "公开上传密钥不能与管理密钥相同")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	id, err := h.db.InsertPublicAPIKey(ctx, req.Name, key)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "创建失败: "+err.Error())
+		return
+	}
+
+	security.SecurityAuditLog("PUBLIC_API_KEY_CREATED", fmt.Sprintf("id=%d name=%s ip=%s", id, security.SanitizeLog(req.Name), c.ClientIP()))
+
+	c.JSON(http.StatusOK, createAPIKeyResponse{
+		ID:   id,
+		Key:  key,
+		Name: req.Name,
+	})
+}
+
+// DeletePublicAPIKey 删除公开上传 API 密钥
+func (h *Handler) DeletePublicAPIKey(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := h.db.DeletePublicAPIKey(ctx, id); err != nil {
 		writeError(c, http.StatusInternalServerError, "删除失败: "+err.Error())
 		return
 	}

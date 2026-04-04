@@ -153,6 +153,14 @@ export const api = {
     }),
   deleteAPIKey: (id: number) =>
     request<MessageResponse>(`/keys/${id}`, { method: 'DELETE' }),
+  getPublicAPIKeys: () => request<APIKeysResponse>('/pubkeys'),
+  createPublicAPIKey: (name: string, key?: string) =>
+    request<CreateAPIKeyResponse>('/pubkeys', {
+      method: 'POST',
+      body: JSON.stringify({ name, ...(key ? { key } : {}) }),
+    }),
+  deletePublicAPIKey: (id: number) =>
+    request<MessageResponse>(`/pubkeys/${id}`, { method: 'DELETE' }),
   clearUsageLogs: () =>
     request<MessageResponse>('/usage/logs', { method: 'DELETE' }),
   getSettings: () => request<SystemSettings>('/settings'),

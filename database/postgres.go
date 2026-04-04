@@ -239,6 +239,13 @@ func (db *DB) migrate(ctx context.Context) error {
 		created_at TIMESTAMP DEFAULT NOW()
 	);
 
+	CREATE TABLE IF NOT EXISTS public_api_keys (
+		id         SERIAL PRIMARY KEY,
+		name       VARCHAR(255) DEFAULT '',
+		key        VARCHAR(255) NOT NULL UNIQUE,
+		created_at TIMESTAMP DEFAULT NOW()
+	);
+
 	CREATE TABLE IF NOT EXISTS system_settings (
 		id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
 		max_concurrency    INT DEFAULT 2,
@@ -337,6 +344,39 @@ func (db *DB) InsertAPIKey(ctx context.Context, name, key string) (int64, error)
 	return db.insertRowID(ctx,
 		`INSERT INTO api_keys (name, key) VALUES ($1, $2) RETURNING id`,
 		`INSERT INTO api_keys (name, key) VALUES ($1, $2)`,
+		name, key,
+	)
+}
+
+// ListPublicAPIKeys 获取所有公开上传密钥
+func (db *DB) ListPublicAPIKeys(ctx context.Context) ([]*APIKeyRow, error) {
+	rows, err := db.conn.QueryContext(ctx, `SELECT id, name, key, created_at FROM public_api_keys ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []*APIKeyRow
+	for rows.Next() {
+		k := &APIKeyRow{}
+		var createdAtRaw interface{}
+		if err := rows.Scan(&k.ID, &k.Name, &k.Key, &createdAtRaw); err != nil {
+			return nil, err
+		}
+		k.CreatedAt, err = parseDBTimeValue(createdAtRaw)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// InsertPublicAPIKey 插入新公开上传密钥
+func (db *DB) InsertPublicAPIKey(ctx context.Context, name, key string) (int64, error) {
+	return db.insertRowID(ctx,
+		`INSERT INTO public_api_keys (name, key) VALUES ($1, $2) RETURNING id`,
+		`INSERT INTO public_api_keys (name, key) VALUES ($1, $2)`,
 		name, key,
 	)
 }
@@ -453,9 +493,34 @@ func (db *DB) DeleteAPIKey(ctx context.Context, id int64) error {
 	return err
 }
 
+// DeletePublicAPIKey 删除公开上传密钥
+func (db *DB) DeletePublicAPIKey(ctx context.Context, id int64) error {
+	_, err := db.conn.ExecContext(ctx, `DELETE FROM public_api_keys WHERE id = $1`, id)
+	return err
+}
+
 // GetAllAPIKeyValues 获取所有密钥值（用于鉴权）
 func (db *DB) GetAllAPIKeyValues(ctx context.Context) ([]string, error) {
 	rows, err := db.conn.QueryContext(ctx, `SELECT key FROM api_keys`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// GetAllPublicAPIKeyValues 获取所有公开上传密钥值（用于上传鉴权）
+func (db *DB) GetAllPublicAPIKeyValues(ctx context.Context) ([]string, error) {
+	rows, err := db.conn.QueryContext(ctx, `SELECT key FROM public_api_keys`)
 	if err != nil {
 		return nil, err
 	}

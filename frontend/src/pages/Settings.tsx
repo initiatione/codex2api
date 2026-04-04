@@ -54,6 +54,9 @@ export default function Settings() {
   const [newKeyName, setNewKeyName] = useState('')
   const [newKeyValue, setNewKeyValue] = useState('')
   const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const [newPublicKeyName, setNewPublicKeyName] = useState('')
+  const [newPublicKeyValue, setNewPublicKeyValue] = useState('')
+  const [createdPublicKey, setCreatedPublicKey] = useState<string | null>(null)
   const [settingsForm, setSettingsForm] = useState<SystemSettings>({
     max_concurrency: 2,
     global_rpm: 0,
@@ -85,7 +88,13 @@ export default function Settings() {
   const { confirm, confirmDialog } = useConfirmDialog()
 
   const loadSettingsData = useCallback(async () => {
-    const [health, keysResponse, settings, modelsResp] = await Promise.all([api.getHealth(), api.getAPIKeys(), api.getSettings(), api.getModels()])
+    const [health, keysResponse, pubKeysResponse, settings, modelsResp] = await Promise.all([
+      api.getHealth(),
+      api.getAPIKeys(),
+      api.getPublicAPIKeys(),
+      api.getSettings(),
+      api.getModels(),
+    ])
     const fullUsageMode = normalizeFullUsageMode(settings.auto_clean_full_usage_mode, settings.auto_clean_full_usage)
     setSettingsForm({
       ...settings,
@@ -97,16 +106,19 @@ export default function Settings() {
     return {
       health,
       keys: keysResponse.keys ?? [],
+      pubKeys: pubKeysResponse.keys ?? [],
     }
   }, [])
 
   const { data, loading, error, reload } = useDataLoader<{
     health: HealthResponse | null
     keys: APIKeyRow[]
+    pubKeys: APIKeyRow[]
   }>({
     initialData: {
       health: null,
       keys: [],
+      pubKeys: [],
     },
     load: loadSettingsData,
   })
@@ -139,6 +151,40 @@ export default function Settings() {
     try {
       await api.deleteAPIKey(id)
       showToast(t('settings.keyDeleted'))
+      void reload()
+    } catch (error) {
+      showToast(`${t('settings.deleteFailed')}: ${getErrorMessage(error)}`, 'error')
+    }
+  }
+
+  const handleCreatePublicKey = async () => {
+    try {
+      const result = await api.createPublicAPIKey(newPublicKeyName.trim() || 'public-upload', newPublicKeyValue.trim() || undefined)
+      setCreatedPublicKey(result.key)
+      setNewPublicKeyName('')
+      setNewPublicKeyValue('')
+      showToast(t('settings.publicKeyCreateSuccess'))
+      void reload()
+    } catch (error) {
+      showToast(`${t('settings.createFailed')}: ${getErrorMessage(error)}`, 'error')
+    }
+  }
+
+  const handleDeletePublicKey = async (id: number) => {
+    const confirmed = await confirm({
+      title: t('settings.deletePublicKeyTitle'),
+      description: t('settings.deletePublicKeyDesc'),
+      confirmText: t('settings.confirmDelete'),
+      tone: 'destructive',
+      confirmVariant: 'destructive',
+    })
+    if (!confirmed) {
+      return
+    }
+
+    try {
+      await api.deletePublicAPIKey(id)
+      showToast(t('settings.publicKeyDeleted'))
       void reload()
     } catch (error) {
       showToast(`${t('settings.deleteFailed')}: ${getErrorMessage(error)}`, 'error')
@@ -206,7 +252,7 @@ export default function Settings() {
     }
   }
 
-  const { health, keys } = data
+  const { health, keys, pubKeys } = data
   const isExternalDatabase = settingsForm.database_driver === 'postgres'
   const isExternalCache = settingsForm.cache_driver === 'redis'
   const showConnectionPool = isExternalDatabase || isExternalCache
@@ -307,6 +353,90 @@ export default function Settings() {
 
             <div className="text-xs text-muted-foreground mt-3">
               {t('settings.keyAuthNote')}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Public Upload API Keys */}
+        <Card className="mb-4">
+          <CardContent className="p-6">
+            <div className="flex items-center justify-between gap-4 mb-4">
+              <h3 className="text-base font-semibold text-foreground">{t('settings.publicApiKeys')}</h3>
+            </div>
+
+            <div className="flex gap-2 mb-4 flex-wrap">
+              <Input
+                className="flex-[1_1_120px]"
+                placeholder={t('settings.keyNamePlaceholder')}
+                value={newPublicKeyName}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setNewPublicKeyName(event.target.value)}
+              />
+              <Input
+                className="flex-[2_1_240px]"
+                placeholder={t('settings.keyValuePlaceholder')}
+                value={newPublicKeyValue}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setNewPublicKeyValue(event.target.value)}
+                onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+                  if (event.key === 'Enter') {
+                    void handleCreatePublicKey()
+                  }
+                }}
+              />
+              <Button onClick={() => void handleCreatePublicKey()} className="whitespace-nowrap">
+                {t('settings.createKey')}
+              </Button>
+            </div>
+
+            {createdPublicKey ? (
+              <div className="p-3 mb-4 rounded-xl bg-[hsl(var(--success-bg))] border border-[hsl(var(--success))]/20 text-sm">
+                <div className="font-semibold mb-1 text-[hsl(var(--success))]">{t('settings.publicKeyCreated')}</div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 font-mono text-[13px] break-all">{createdPublicKey}</code>
+                  <Button variant="outline" size="sm" onClick={() => void handleCopy(createdPublicKey)}>{t('common.copy')}</Button>
+                </div>
+              </div>
+            ) : null}
+
+            <StateShell
+              variant="section"
+              isEmpty={pubKeys.length === 0}
+              emptyTitle={t('settings.noPublicKeys')}
+              emptyDescription={t('settings.noPublicKeysDesc')}
+            >
+              <div className="overflow-auto border border-border rounded-xl">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="text-[13px] font-semibold">{t('common.name')}</TableHead>
+                      <TableHead className="text-[13px] font-semibold">{t('common.key')}</TableHead>
+                      <TableHead className="text-[13px] font-semibold">{t('common.createdAt')}</TableHead>
+                      <TableHead className="text-[13px] font-semibold">{t('common.actions')}</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {pubKeys.map((keyRow) => (
+                      <TableRow key={keyRow.id}>
+                        <TableCell className="text-[14px] font-medium">{keyRow.name}</TableCell>
+                        <TableCell>
+                          <span className="font-mono text-[20px]">{maskKey(keyRow.key)}</span>
+                        </TableCell>
+                        <TableCell className="text-[14px] text-muted-foreground">
+                          {formatRelativeTime(keyRow.created_at, { variant: 'compact' })}
+                        </TableCell>
+                        <TableCell>
+                          <Button variant="destructive" size="sm" onClick={() => void handleDeletePublicKey(keyRow.id)}>
+                            {t('common.delete')}
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </StateShell>
+
+            <div className="text-xs text-muted-foreground mt-3">
+              {t('settings.publicKeyAuthNote')}
             </div>
           </CardContent>
         </Card>
