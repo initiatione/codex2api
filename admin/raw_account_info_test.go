@@ -67,7 +67,7 @@ func TestMergeCredentialRefresh_PreferHigherPlan(t *testing.T) {
 		"plan_type": "free",
 	}
 
-	refreshed, updates := mergeCredentialRefresh(profile, upstream, "free")
+	refreshed, updates := mergeCredentialRefresh(profile, upstream, "free", "plus")
 
 	if got := refreshed["plan_type"]; got != "plus" {
 		t.Fatalf("refreshed plan_type = %q, want plus", got)
@@ -77,5 +77,19 @@ func TestMergeCredentialRefresh_PreferHigherPlan(t *testing.T) {
 	}
 	if got := refreshed["email"]; got != "from_cpa@example.com" {
 		t.Fatalf("email = %q, want from_cpa@example.com", got)
+	}
+}
+
+func TestDetectPlanFromPayload_MeSubscriptionFlag(t *testing.T) {
+	raw := []byte(`{
+		"has_paid_subscription": true
+	}`)
+
+	plan, source := detectPlanFromPayload(openAIMeURL, raw)
+	if plan != "plus" {
+		t.Fatalf("plan = %q, want plus", plan)
+	}
+	if source == "" {
+		t.Fatal("source should not be empty")
 	}
 }

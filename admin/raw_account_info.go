@@ -20,7 +20,11 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const whamAccountCheckURL = "https://chatgpt.com/backend-api/wham/accounts/check"
+const (
+	openAIMeURL               = "https://chatgpt.com/backend-api/me"
+	openAIWhamUsageURL        = "https://chatgpt.com/backend-api/wham/usage"
+	openAIWhamAccountCheckURL = "https://chatgpt.com/backend-api/wham/accounts/check"
+)
 
 type cliproxyProfile struct {
 	Email      string
@@ -29,7 +33,16 @@ type cliproxyProfile struct {
 	PlanSource string
 }
 
-// GetAccountRawInfo 获取账号一手信息：以 CPA/CLIProxyAPI 口径为主，附带上游 wham 原始响应。
+type openAISnapshot struct {
+	Endpoint   string
+	Raw        []byte
+	StatusCode int
+	Err        error
+	PlanType   string
+	PlanSource string
+}
+
+// GetAccountRawInfo 获取账号一手信息：以 CPA/CLIProxyAPI 口径为主，原始数据返回 OpenAI 原生响应。
 // GET /api/admin/accounts/:id/raw-info
 func (h *Handler) GetAccountRawInfo(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
@@ -56,7 +69,7 @@ func (h *Handler) GetAccountRawInfo(c *gin.Context) {
 	account.Mu().RUnlock()
 	needsRefresh := account.NeedsRefresh()
 
-	// 对齐 CPA：优先保证 token 为最新状态
+	// 对齐 CPA：先尽量刷新到最新 token，再拉取账号信息。
 	if (!hasAccessToken || needsRefresh) && hasRefreshToken {
 		refreshCtx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
 		defer cancel()
@@ -100,42 +113,18 @@ func (h *Handler) GetAccountRawInfo(c *gin.Context) {
 
 	reqCtx, reqCancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer reqCancel()
+	snapshots := fetchOpenAISnapshots(reqCtx, accessToken, accountID, proxyURL)
 
-	var (
-		upstreamRawBody    []byte
-		upstreamParsedBody any
-		upstreamErr        error
-	)
-
-	upstreamRawBody, statusCode, reqErr := requestWhamAccountCheck(reqCtx, accessToken, accountID, proxyURL)
-	if reqErr != nil {
-		upstreamErr = reqErr
-		if len(upstreamRawBody) > 0 {
-			errCode := strings.TrimSpace(gjson.GetBytes(upstreamRawBody, "error.code").String())
-			errMsg := strings.TrimSpace(gjson.GetBytes(upstreamRawBody, "error.message").String())
-			if errMsg == "" {
-				errMsg = strings.TrimSpace(gjson.GetBytes(upstreamRawBody, "message").String())
-			}
-			account.SetLastFailureDetail(statusCode, errCode, errMsg)
-			switch statusCode {
-			case http.StatusUnauthorized:
-				h.store.MarkCooldown(account, 24*time.Hour, "unauthorized")
-			case http.StatusTooManyRequests:
-				if !h.store.MarkFullUsageCooldownFromSnapshot(account) {
-					h.store.MarkCooldown(account, auth.RateLimitedProbeInterval, "rate_limited")
-				}
-			}
-		}
-	} else {
-		if err := json.Unmarshal(upstreamRawBody, &upstreamParsedBody); err != nil {
-			upstreamErr = fmt.Errorf("上游返回了非 JSON 数据")
-		} else {
-			account.ClearLastFailureDetail()
+	bestPlan, bestSource, bestRaw, bestEndpoint := pickBestPlanSnapshot(snapshots)
+	if len(bestRaw) == 0 {
+		if !hasCliproxyProfile(profile) {
+			writeError(c, http.StatusBadGateway, firstSnapshotError(snapshots, "拉取 OpenAI 原始信息失败"))
+			return
 		}
 	}
 
-	upstreamFields, _ := extractCredentialUpdatesFromRawInfo(upstreamRawBody)
-	refreshedFields, credentialUpdates := mergeCredentialRefresh(profile, upstreamFields, currentPlan)
+	snapshotFields, _ := extractCredentialUpdatesFromRawInfo(bestRaw)
+	refreshedFields, credentialUpdates := mergeCredentialRefresh(profile, snapshotFields, currentPlan, bestPlan)
 	credentialUpdates["raw_info_refreshed_at"] = time.Now().UTC().Format(time.RFC3339)
 
 	dbCtx, dbCancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -148,32 +137,73 @@ func (h *Handler) GetAccountRawInfo(c *gin.Context) {
 	applyRawInfoToRuntimeAccount(account, refreshedFields)
 	h.db.InsertAccountEventAsync(id, "raw_info_refreshed", "manual")
 
-	if upstreamErr != nil && !hasCliproxyProfile(profile) {
-		writeError(c, http.StatusBadGateway, upstreamErr.Error())
-		return
+	if bestSource == "" {
+		bestSource = profile.PlanSource
 	}
 
-	rawPayload := gin.H{
-		"cliproxyapi_profile": buildCliproxyProfilePayload(profile),
-	}
-	if upstreamParsedBody != nil {
-		rawPayload["upstream_wham_accounts_check"] = upstreamParsedBody
-	}
-	if upstreamErr != nil {
-		rawPayload["upstream_wham_accounts_check_error"] = upstreamErr.Error()
+	rawPayload := json.RawMessage([]byte(`{}`))
+	if len(bestRaw) > 0 {
+		rawPayload = json.RawMessage(bestRaw)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":          "账号原始信息获取成功",
-		"source":           "cliproxyapi",
+		"source":           "openai",
 		"fetched_at":       time.Now().UTC().Format(time.RFC3339),
 		"refreshed_fields": refreshedFields,
+		"plan_source":      bestSource,
+		"raw_endpoint":     bestEndpoint,
 		"raw":              rawPayload,
 	})
 }
 
-func requestWhamAccountCheck(ctx context.Context, accessToken, accountID, proxyURL string) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, whamAccountCheckURL, nil)
+func fetchOpenAISnapshots(ctx context.Context, accessToken, accountID, proxyURL string) []openAISnapshot {
+	steps := []struct {
+		endpoint          string
+		withAccountHeader bool
+	}{
+		{endpoint: openAIMeURL, withAccountHeader: true},
+		{endpoint: openAIMeURL, withAccountHeader: false},
+		{endpoint: openAIWhamUsageURL, withAccountHeader: true},
+		{endpoint: openAIWhamAccountCheckURL, withAccountHeader: true},
+		{endpoint: openAIWhamUsageURL, withAccountHeader: false},
+		{endpoint: openAIWhamAccountCheckURL, withAccountHeader: false},
+	}
+
+	snapshots := make([]openAISnapshot, 0, len(steps))
+	bestPlan := ""
+
+	for _, step := range steps {
+		if !step.withAccountHeader && strings.TrimSpace(accountID) == "" {
+			continue
+		}
+
+		raw, statusCode, err := requestOpenAIEndpoint(ctx, step.endpoint, accessToken, accountID, proxyURL, step.withAccountHeader)
+		snapshot := openAISnapshot{
+			Endpoint:   step.endpoint,
+			Raw:        raw,
+			StatusCode: statusCode,
+			Err:        err,
+		}
+		if err == nil {
+			snapshot.PlanType, snapshot.PlanSource = detectPlanFromPayload(step.endpoint, raw)
+			if isPlanBetter(bestPlan, snapshot.PlanType) {
+				bestPlan = snapshot.PlanType
+			}
+		}
+		snapshots = append(snapshots, snapshot)
+
+		// 已拿到付费套餐信号时可以提前结束，减少额外上游请求。
+		if strings.TrimSpace(bestPlan) != "" && auth.NormalizePlanType(bestPlan) != "free" {
+			break
+		}
+	}
+
+	return snapshots
+}
+
+func requestOpenAIEndpoint(ctx context.Context, endpoint, accessToken, accountID, proxyURL string, withAccountHeader bool) ([]byte, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("创建上游请求失败: %w", err)
 	}
@@ -190,7 +220,7 @@ func requestWhamAccountCheck(ctx context.Context, accessToken, accountID, proxyU
 	if strings.TrimSpace(profile.Version) != "" {
 		req.Header.Set("Version", profile.Version)
 	}
-	if strings.TrimSpace(accountID) != "" {
+	if withAccountHeader && strings.TrimSpace(accountID) != "" {
 		req.Header.Set("ChatGPT-Account-Id", strings.TrimSpace(accountID))
 	}
 
@@ -252,7 +282,6 @@ func resolveCliproxyProfile(row *database.AccountRow) cliproxyProfile {
 	result := cliproxyProfile{}
 	credEmail := strings.TrimSpace(row.GetCredential("email"))
 	credAccountID := strings.TrimSpace(row.GetCredential("account_id"))
-	credPlan := auth.NormalizePlanType(strings.TrimSpace(row.GetCredential("plan_type")))
 
 	if credEmail != "" {
 		result.Email = credEmail
@@ -268,15 +297,17 @@ func resolveCliproxyProfile(row *database.AccountRow) cliproxyProfile {
 		if candidate == "" {
 			return
 		}
-		next := auth.PreferPlanType(plan, candidate)
-		if next != plan {
-			plan = next
+		if isPlanBetter(plan, candidate) {
+			plan = candidate
 			planSource = source
 		}
 	}
 
-	if credPlan != "" {
+	if credPlan := strings.TrimSpace(row.GetCredential("plan_type")); credPlan != "" {
 		applyPlan(credPlan, "credentials.plan_type")
+	}
+	if credPlan := strings.TrimSpace(row.GetCredential("chatgpt_plan_type")); credPlan != "" {
+		applyPlan(credPlan, "credentials.chatgpt_plan_type")
 	}
 
 	if accessToken := strings.TrimSpace(row.GetCredential("access_token")); accessToken != "" {
@@ -328,16 +359,198 @@ func hasCliproxyProfile(profile cliproxyProfile) bool {
 		strings.TrimSpace(profile.PlanType) != ""
 }
 
-func buildCliproxyProfilePayload(profile cliproxyProfile) gin.H {
-	return gin.H{
-		"email":       profile.Email,
-		"account_id":  profile.AccountID,
-		"plan_type":   profile.PlanType,
-		"plan_source": profile.PlanSource,
+func pickBestPlanSnapshot(snapshots []openAISnapshot) (plan string, source string, raw []byte, endpoint string) {
+	for _, snapshot := range snapshots {
+		if snapshot.Err != nil || len(snapshot.Raw) == 0 {
+			continue
+		}
+		if len(raw) == 0 {
+			raw = snapshot.Raw
+			endpoint = snapshot.Endpoint
+			source = snapshot.PlanSource
+		}
+		if isPlanBetter(plan, snapshot.PlanType) {
+			plan = snapshot.PlanType
+			source = snapshot.PlanSource
+			raw = snapshot.Raw
+			endpoint = snapshot.Endpoint
+		}
+	}
+	return plan, source, raw, endpoint
+}
+
+func firstSnapshotError(snapshots []openAISnapshot, fallback string) string {
+	for _, snapshot := range snapshots {
+		if snapshot.Err != nil {
+			return snapshot.Err.Error()
+		}
+	}
+	return fallback
+}
+
+func detectPlanFromPayload(endpoint string, raw []byte) (string, string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", ""
+	}
+
+	endpointLabel := openAIEndpointLabel(endpoint)
+	bestPlan := ""
+	bestSource := ""
+
+	apply := func(candidatePlan string, suffix string) {
+		candidatePlan = auth.NormalizePlanType(candidatePlan)
+		if candidatePlan == "" {
+			return
+		}
+		if isPlanBetter(bestPlan, candidatePlan) {
+			bestPlan = candidatePlan
+			if suffix == "" {
+				bestSource = endpointLabel
+			} else {
+				bestSource = endpointLabel + "." + suffix
+			}
+		}
+	}
+
+	for _, candidate := range collectPlanCandidates(payload) {
+		apply(candidate, "plan")
+	}
+
+	// 对齐 CPA：me 接口额外参考 org/workspace 与订阅布尔信号。
+	if endpoint == openAIMeURL {
+		if plan, ok := detectPlanFromMeOrgSettings(payload); ok {
+			apply(plan, "org.workspace_plan_type")
+		}
+		if hasPaidSubscriptionSignal(payload) {
+			apply("plus", "subscription_flag")
+		}
+	}
+
+	return bestPlan, bestSource
+}
+
+func detectPlanFromMeOrgSettings(value any) (string, bool) {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	orgs, ok := root["orgs"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	items, ok := orgs["data"].([]any)
+	if !ok {
+		return "", false
+	}
+
+	best := ""
+	for _, item := range items {
+		org, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if settings, ok := org["settings"].(map[string]any); ok {
+			if workspacePlan, ok := settings["workspace_plan_type"].(string); ok {
+				if isPlanBetter(best, workspacePlan) {
+					best = auth.NormalizePlanType(workspacePlan)
+				}
+			}
+		}
+		if orgPlan, ok := org["plan_type"].(string); ok {
+			if isPlanBetter(best, orgPlan) {
+				best = auth.NormalizePlanType(orgPlan)
+			}
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
+}
+
+func hasPaidSubscriptionSignal(value any) bool {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"has_paid_subscription", "has_active_subscription", "is_paid", "is_subscribed"} {
+		if v, exists := root[key]; exists {
+			if b, ok := v.(bool); ok && b {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func collectPlanCandidates(value any) []string {
+	keys := map[string]struct{}{
+		"plan_type":           {},
+		"plan":                {},
+		"subscription_plan":   {},
+		"subscription_tier":   {},
+		"chatgpt_plan_type":   {},
+		"tier":                {},
+		"workspace_plan_type": {},
+		"product":             {},
+	}
+
+	out := make([]string, 0, 8)
+	var walk func(node any)
+	walk = func(node any) {
+		switch v := node.(type) {
+		case map[string]any:
+			for key, val := range v {
+				if _, ok := keys[strings.ToLower(strings.TrimSpace(key))]; ok {
+					if s, ok := val.(string); ok {
+						s = strings.TrimSpace(s)
+						if s != "" {
+							out = append(out, s)
+						}
+					}
+				}
+				walk(val)
+			}
+		case []any:
+			for _, item := range v {
+				walk(item)
+			}
+		}
+	}
+	walk(value)
+	return out
+}
+
+func openAIEndpointLabel(endpoint string) string {
+	switch endpoint {
+	case openAIMeURL:
+		return "me"
+	case openAIWhamUsageURL:
+		return "wham_usage"
+	case openAIWhamAccountCheckURL:
+		return "wham_accounts_check"
+	default:
+		return endpoint
 	}
 }
 
-func mergeCredentialRefresh(profile cliproxyProfile, upstream map[string]string, currentPlan string) (map[string]string, map[string]interface{}) {
+func isPlanBetter(current, candidate string) bool {
+	currentNorm := auth.NormalizePlanType(current)
+	candidateNorm := auth.NormalizePlanType(candidate)
+	if candidateNorm == "" {
+		return false
+	}
+	if currentNorm == "" {
+		return true
+	}
+	return auth.PreferPlanType(currentNorm, candidateNorm) == candidateNorm && currentNorm != candidateNorm
+}
+
+func mergeCredentialRefresh(profile cliproxyProfile, upstream map[string]string, currentPlan string, detectedPlan string) (map[string]string, map[string]interface{}) {
 	refreshed := make(map[string]string, 3)
 	updates := make(map[string]interface{}, 3)
 
@@ -361,6 +574,9 @@ func mergeCredentialRefresh(profile cliproxyProfile, upstream map[string]string,
 
 	selectedPlan := auth.NormalizePlanType(strings.TrimSpace(currentPlan))
 	if candidate := strings.TrimSpace(profile.PlanType); candidate != "" {
+		selectedPlan = auth.PreferPlanType(selectedPlan, candidate)
+	}
+	if candidate := strings.TrimSpace(detectedPlan); candidate != "" {
 		selectedPlan = auth.PreferPlanType(selectedPlan, candidate)
 	}
 	if candidate := strings.TrimSpace(upstream["plan_type"]); candidate != "" {
