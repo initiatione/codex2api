@@ -1,5 +1,6 @@
 import type {
   AccountEventTrendPoint,
+  AccountRawInfoResponse,
   AccountUsageDetail,
   AddAccountRequest,
   AddATAccountRequest,
@@ -104,6 +105,8 @@ export const api = {
     request<MessageResponse>(`/accounts/${id}`, { method: 'DELETE' }),
   refreshAccount: (id: number) =>
     request<MessageResponse>(`/accounts/${id}/refresh`, { method: 'POST' }),
+  getAccountRawInfo: (id: number) =>
+    request<AccountRawInfoResponse>(`/accounts/${id}/raw-info`),
   getAccountUsage: (id: number) =>
     request<AccountUsageDetail>(`/accounts/${id}/usage`),
   getHealth: () => request<HealthResponse>('/health'),

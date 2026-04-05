@@ -108,6 +108,13 @@ export default function Accounts() {
   const [cleaningRateLimited, setCleaningRateLimited] = useState(false)
   const [cleaningError, setCleaningError] = useState(false)
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null)
+  const [rawInfoLoadingIds, setRawInfoLoadingIds] = useState<Set<number>>(new Set())
+  const [rawInfoDialog, setRawInfoDialog] = useState<{
+    account: AccountRow
+    fetchedAt: string
+    refreshedFields: Record<string, string>
+    rawText: string
+  } | null>(null)
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null)
   const [importing, setImporting] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -568,6 +575,30 @@ export default function Accounts() {
     }
   }
 
+  const handleViewRawInfo = async (account: AccountRow) => {
+    setRawInfoLoadingIds((prev) => new Set(prev).add(account.id))
+    try {
+      const result = await api.getAccountRawInfo(account.id)
+      const rawText = JSON.stringify(result.raw, null, 2)
+      setRawInfoDialog({
+        account,
+        fetchedAt: result.fetched_at,
+        refreshedFields: result.refreshed_fields ?? {},
+        rawText: rawText || '{}',
+      })
+      showToast(result.message || t('accounts.rawInfoFetchSuccess'))
+      void reloadSilently()
+    } catch (error) {
+      showToast(t('accounts.rawInfoFetchFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setRawInfoLoadingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(account.id)
+        return next
+      })
+    }
+  }
+
   const handleBatchDelete = async () => {
     if (selected.size === 0) return
     const confirmed = await confirm({
@@ -1021,6 +1052,16 @@ export default function Accounts() {
                               variant="outline"
                               size="icon"
                               className="h-7 w-8 px-0"
+                              disabled={rawInfoLoadingIds.has(account.id)}
+                              onClick={() => void handleViewRawInfo(account)}
+                              title={t('accounts.viewRawInfo')}
+                            >
+                              <FileJson className={`size-3.5 ${rawInfoLoadingIds.has(account.id) ? 'animate-spin' : ''}`} />
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="h-7 w-8 px-0"
                               onClick={() => setUsageAccount(account)}
                               title={t('accounts.usageDetail')}
                             >
@@ -1430,6 +1471,42 @@ export default function Accounts() {
             onClose={() => setTestingAccount(null)}
           />
         )}
+
+        <Modal
+          show={rawInfoDialog !== null}
+          title={t('accounts.rawInfoModalTitle', {
+            account: rawInfoDialog?.account.email || `ID ${rawInfoDialog?.account.id ?? ''}`,
+          })}
+          contentClassName="sm:max-w-[960px]"
+          onClose={() => setRawInfoDialog(null)}
+        >
+          {rawInfoDialog ? (
+            <div className="space-y-4">
+              <div className="grid gap-2 text-sm text-muted-foreground">
+                <div>
+                  {t('accounts.rawInfoFetchedAt')}: {formatBeijingTime(rawInfoDialog.fetchedAt)}
+                </div>
+                <div className="space-y-1">
+                  <div>{t('accounts.rawInfoRefreshedFields')}:</div>
+                  {Object.keys(rawInfoDialog.refreshedFields).length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {Object.entries(rawInfoDialog.refreshedFields).map(([key, value]) => (
+                        <span key={key} className="rounded-md border border-border px-2 py-1 text-xs text-foreground">
+                          {key}: {value}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-xs">{t('accounts.rawInfoNoFieldUpdated')}</div>
+                  )}
+                </div>
+              </div>
+              <pre className="max-h-[62vh] overflow-auto rounded-md border border-border bg-muted/40 p-3 text-xs leading-5 whitespace-pre-wrap break-all">
+                {rawInfoDialog.rawText || t('accounts.rawInfoEmpty')}
+              </pre>
+            </div>
+          ) : null}
+        </Modal>
 
         {usageAccount && (
           <AccountUsageModal account={usageAccount} onClose={() => setUsageAccount(null)} />

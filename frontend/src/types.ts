@@ -94,6 +94,14 @@ export interface AccountUsageDetail {
   models: AccountModelStat[]
 }
 
+export interface AccountRawInfoResponse {
+  message: string
+  source: string
+  fetched_at: ISODateString
+  refreshed_fields?: Record<string, string>
+  raw: unknown
+}
+
 export interface MessageResponse {
   message: string
 }
