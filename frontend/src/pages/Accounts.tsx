@@ -89,7 +89,7 @@ export default function Accounts() {
   const [page, setPage] = useState(1)
   const [statusFilter, setStatusFilter] = useState<'all' | 'normal' | 'rate_limited' | 'full_usage' | 'banned'>('all')
   const [searchQuery, setSearchQuery] = useState('')
-  const [planFilter, setPlanFilter] = useState<'all' | 'pro' | 'team' | 'free'>('all')
+  const [planFilter, setPlanFilter] = useState<'all' | 'plus' | 'pro' | 'team' | 'free'>('all')
   const [sortKey, setSortKey] = useState<'requests' | 'usage' | 'importTime' | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
@@ -838,7 +838,7 @@ export default function Accounts() {
             />
           </div>
           <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5">
-            {(['all', 'pro', 'team', 'free'] as const).map((key) => (
+            {(['all', 'plus', 'pro', 'team', 'free'] as const).map((key) => (
               <button
                 key={key}
                 onClick={() => { setPlanFilter(key); setPage(1) }}
@@ -1898,7 +1898,7 @@ function UsageCell({ account, t }: { account: AccountRow; t: (key: string, optio
     return wrap(<UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />, 'w-40')
   }
 
-  if (plan === 'pro' || plan === 'team') {
+  if (plan === 'plus' || plan === 'pro' || plan === 'team') {
     if (!has5h && !has7d) return wrap(<span className="text-[12px] text-muted-foreground">-</span>, 'w-48')
     return wrap(
       <div className="space-y-1.5">
