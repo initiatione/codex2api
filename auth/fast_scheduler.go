@@ -32,21 +32,28 @@ type fastSchedulerPosition struct {
 // 1. 优先在验证过的账号（score > 100，排在桶前部）中 round-robin
 // 2. 验证账号全忙时，回退到全量 round-robin
 type FastScheduler struct {
-	mu           sync.RWMutex
-	baseLimit    int64
-	buckets      map[AccountHealthTier][]fastSchedulerEntry
-	positions    map[int64]fastSchedulerPosition
-	cursors      [3]atomic.Uint64
-	provenBounds [3]int          // 每个 tier 桶中验证过的账号数量（排在前面）
-	provenCurs   [3]atomic.Uint64 // 验证账号专用 round-robin 游标
+	mu                 sync.RWMutex
+	baseLimit          int64
+	preferredPlan      string
+	preferredPlanBonus float64
+	buckets            map[AccountHealthTier][]fastSchedulerEntry
+	positions          map[int64]fastSchedulerPosition
+	cursors            [3]atomic.Uint64
+	provenBounds       [3]int           // 每个 tier 桶中验证过的账号数量（排在前面）
+	provenCurs         [3]atomic.Uint64 // 验证账号专用 round-robin 游标
 }
 
-func NewFastScheduler(baseLimit int64) *FastScheduler {
+func NewFastScheduler(baseLimit int64, preferredPlan string, preferredPlanBonus float64) *FastScheduler {
 	if baseLimit <= 0 {
 		baseLimit = 1
 	}
+	if preferredPlanBonus < 0 {
+		preferredPlanBonus = 0
+	}
 	return &FastScheduler{
-		baseLimit: baseLimit,
+		baseLimit:          baseLimit,
+		preferredPlan:      normalizePreferredPlanType(preferredPlan),
+		preferredPlanBonus: preferredPlanBonus,
 		buckets: map[AccountHealthTier][]fastSchedulerEntry{
 			HealthTierHealthy: nil,
 			HealthTierWarm:    nil,
@@ -60,9 +67,13 @@ func NewFastScheduler(baseLimit int64) *FastScheduler {
 // 该方法不会影响现有生产流量路径，只用于 POC/benchmark/灰度验证。
 func (s *Store) BuildFastScheduler() *FastScheduler {
 	if s == nil {
-		return NewFastScheduler(1)
+		return NewFastScheduler(1, "", 0)
 	}
-	scheduler := NewFastScheduler(atomic.LoadInt64(&s.maxConcurrency))
+	scheduler := NewFastScheduler(
+		atomic.LoadInt64(&s.maxConcurrency),
+		s.GetPreferredPlanType(),
+		float64(s.GetPreferredPlanBonus()),
+	)
 
 	s.mu.RLock()
 	accounts := make([]*Account, len(s.accounts))
@@ -101,6 +112,7 @@ func (s *FastScheduler) Rebuild(accounts []*Account) {
 		if tier != HealthTierHealthy && tier != HealthTierWarm && tier != HealthTierRisky {
 			continue
 		}
+		score += s.planBonusForAccount(acc)
 		s.buckets[tier] = append(s.buckets[tier], fastSchedulerEntry{
 			acc:   acc,
 			dbID:  acc.DBID,
@@ -261,6 +273,7 @@ func (s *FastScheduler) insertLocked(acc *Account, now time.Time) {
 	if tier != HealthTierHealthy && tier != HealthTierWarm && tier != HealthTierRisky {
 		return
 	}
+	score += s.planBonusForAccount(acc)
 
 	entries := append(s.buckets[tier], fastSchedulerEntry{
 		acc:   acc,
@@ -328,6 +341,26 @@ func (s *FastScheduler) rebuildPositionsLocked(tier AccountHealthTier) {
 			index: idx,
 		}
 	}
+}
+
+func (s *FastScheduler) planBonusForAccount(acc *Account) float64 {
+	if s == nil || acc == nil {
+		return 0
+	}
+	return s.planBonusForPlan(acc.GetPlanType())
+}
+
+func (s *FastScheduler) planBonusForPlan(plan string) float64 {
+	if s == nil {
+		return 0
+	}
+	if s.preferredPlanBonus <= 0 || s.preferredPlan == "" {
+		return 0
+	}
+	if matchPreferredPlan(plan, s.preferredPlan) {
+		return s.preferredPlanBonus
+	}
+	return 0
 }
 
 func (a *Account) fastSchedulerSnapshot(baseLimit int64, now time.Time) (AccountHealthTier, float64, int64, bool) {

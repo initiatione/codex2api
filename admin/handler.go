@@ -1897,6 +1897,8 @@ type settingsResponse struct {
 	AutoCleanExpired       bool    `json:"auto_clean_expired"`
 	ProxyPoolEnabled       bool    `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled   bool    `json:"fast_scheduler_enabled"`
+	SchedulerPreferredPlan string  `json:"scheduler_preferred_plan"`
+	SchedulerPlanBonus     int     `json:"scheduler_plan_bonus"`
 	MaxRetries             int     `json:"max_retries"`
 	AllowRemoteMigration   bool    `json:"allow_remote_migration"`
 	PublicInitialCreditUSD float64 `json:"public_initial_credit_usd"`
@@ -1925,10 +1927,27 @@ type updateSettingsReq struct {
 	AutoCleanExpired       *bool    `json:"auto_clean_expired"`
 	ProxyPoolEnabled       *bool    `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled   *bool    `json:"fast_scheduler_enabled"`
+	SchedulerPreferredPlan *string  `json:"scheduler_preferred_plan"`
+	SchedulerPlanBonus     *int     `json:"scheduler_plan_bonus"`
 	MaxRetries             *int     `json:"max_retries"`
 	AllowRemoteMigration   *bool    `json:"allow_remote_migration"`
 	PublicInitialCreditUSD *float64 `json:"public_initial_credit_usd"`
 	PublicFullCreditUSD    *float64 `json:"public_full_credit_usd"`
+}
+
+func normalizeSchedulerPreferredPlan(raw string) (string, bool) {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	switch trimmed {
+	case "", "off", "none", "disabled":
+		return "", true
+	}
+	normalized := auth.NormalizePlanType(trimmed)
+	switch normalized {
+	case "free", "plus", "pro", "team", "enterprise":
+		return normalized, true
+	default:
+		return "", false
+	}
 }
 
 // GetSettings 获取当前系统设置
@@ -1959,6 +1978,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AutoCleanExpired:       h.store.GetAutoCleanExpired(),
 		ProxyPoolEnabled:       h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
+		SchedulerPreferredPlan: h.store.GetPreferredPlanType(),
+		SchedulerPlanBonus:     h.store.GetPreferredPlanBonus(),
 		MaxRetries:             h.store.GetMaxRetries(),
 		AllowRemoteMigration:   h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
 		PublicInitialCreditUSD: h.store.GetPublicInitialCreditUSD(),
@@ -2115,6 +2136,34 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: fast_scheduler_enabled = %t", *req.FastSchedulerEnabled)
 	}
 
+	preferredPlan := h.store.GetPreferredPlanType()
+	preferredBonus := h.store.GetPreferredPlanBonus()
+	needApplyPreferredPlan := false
+	if req.SchedulerPreferredPlan != nil {
+		normalizedPlan, ok := normalizeSchedulerPreferredPlan(*req.SchedulerPreferredPlan)
+		if !ok {
+			writeError(c, http.StatusBadRequest, "scheduler_preferred_plan 仅支持 off/free/plus/pro/team/enterprise")
+			return
+		}
+		preferredPlan = normalizedPlan
+		needApplyPreferredPlan = true
+	}
+	if req.SchedulerPlanBonus != nil {
+		v := *req.SchedulerPlanBonus
+		if v < 0 {
+			v = 0
+		}
+		if v > 200 {
+			v = 200
+		}
+		preferredBonus = v
+		needApplyPreferredPlan = true
+	}
+	if needApplyPreferredPlan {
+		h.store.SetPreferredPlanPriority(preferredPlan, preferredBonus)
+		log.Printf("设置已更新: scheduler_preferred_plan = %s, scheduler_plan_bonus = %d", h.store.GetPreferredPlanType(), h.store.GetPreferredPlanBonus())
+	}
+
 	if req.MaxRetries != nil {
 		v := *req.MaxRetries
 		if v < 0 {
@@ -2179,6 +2228,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanExpired:       h.store.GetAutoCleanExpired(),
 		ProxyPoolEnabled:       h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
+		SchedulerPreferredPlan: h.store.GetPreferredPlanType(),
+		SchedulerPlanBonus:     h.store.GetPreferredPlanBonus(),
 		MaxRetries:             h.store.GetMaxRetries(),
 		AllowRemoteMigration:   h.store.GetAllowRemoteMigration() && hasAdminSecret,
 		PublicInitialCreditUSD: h.store.GetPublicInitialCreditUSD(),
@@ -2219,6 +2270,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanExpired:       h.store.GetAutoCleanExpired(),
 		ProxyPoolEnabled:       h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
+		SchedulerPreferredPlan: h.store.GetPreferredPlanType(),
+		SchedulerPlanBonus:     h.store.GetPreferredPlanBonus(),
 		MaxRetries:             h.store.GetMaxRetries(),
 		AllowRemoteMigration:   h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
 		PublicInitialCreditUSD: h.store.GetPublicInitialCreditUSD(),

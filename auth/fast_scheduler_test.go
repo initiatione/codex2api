@@ -21,7 +21,7 @@ func TestFastSchedulerAcquirePrefersHealthyTier(t *testing.T) {
 	warm := newFastSchedulerTestAccount(1, HealthTierWarm, 90, 2)
 	healthy := newFastSchedulerTestAccount(2, HealthTierHealthy, 80, 2)
 
-	scheduler := NewFastScheduler(2)
+	scheduler := NewFastScheduler(2, "", 0)
 	scheduler.Rebuild([]*Account{warm, healthy})
 
 	got := scheduler.Acquire()
@@ -38,7 +38,7 @@ func TestFastSchedulerAcquirePrefersHealthyTier(t *testing.T) {
 func TestFastSchedulerRespectsConcurrencyLimit(t *testing.T) {
 	acc := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
 
-	scheduler := NewFastScheduler(1)
+	scheduler := NewFastScheduler(1, "", 0)
 	scheduler.Rebuild([]*Account{acc})
 
 	first := scheduler.Acquire()
@@ -64,7 +64,7 @@ func TestFastSchedulerRoundRobinWithinTier(t *testing.T) {
 	a2 := newFastSchedulerTestAccount(2, HealthTierHealthy, 100, 4)
 	a3 := newFastSchedulerTestAccount(3, HealthTierHealthy, 100, 4)
 
-	scheduler := NewFastScheduler(4)
+	scheduler := NewFastScheduler(4, "", 0)
 	scheduler.Rebuild([]*Account{a1, a2, a3})
 
 	var got []int64
@@ -87,7 +87,7 @@ func TestFastSchedulerRoundRobinWithinTier(t *testing.T) {
 
 func TestFastSchedulerUpdateMovesAccountBetweenBuckets(t *testing.T) {
 	acc := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 2)
-	scheduler := NewFastScheduler(2)
+	scheduler := NewFastScheduler(2, "", 0)
 	scheduler.Rebuild([]*Account{acc})
 
 	sizes := scheduler.BucketSizes()
@@ -120,7 +120,7 @@ func TestFastSchedulerUpdateMovesAccountBetweenBuckets(t *testing.T) {
 
 func TestFastSchedulerSkipsStaleBucketEntryWithoutUpdate(t *testing.T) {
 	acc := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
-	scheduler := NewFastScheduler(1)
+	scheduler := NewFastScheduler(1, "", 0)
 	scheduler.Rebuild([]*Account{acc})
 
 	acc.SetCooldownUntil(time.Now().Add(5*time.Minute), "rate_limited")
@@ -365,7 +365,7 @@ func TestFastSchedulerRelease(t *testing.T) {
 	acc := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 2)
 	atomic.StoreInt64(&acc.ActiveRequests, 1)
 
-	scheduler := NewFastScheduler(2)
+	scheduler := NewFastScheduler(2, "", 0)
 	scheduler.Release(acc)
 
 	if got := atomic.LoadInt64(&acc.ActiveRequests); got != 0 {

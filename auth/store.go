@@ -803,9 +803,11 @@ type Store struct {
 	autoCleanError          atomic.Bool
 	autoCleanExpired        atomic.Bool
 	autoCleanupBatch        atomic.Bool
-	maxRetries              int64 // 请求失败最大重试次数（换号重试）
-	publicInitialCreditX1e4 int64 // 公开上传账号初始入账金额（美元，放大 1e4）
-	publicFullCreditX1e4    int64 // 公开上传账号满额度总金额（美元，放大 1e4）
+	preferredPlanType       atomic.Value // string: free/plus/pro/team/enterprise 或空
+	preferredPlanBonus      int64        // 指定套餐额外调度加分
+	maxRetries              int64        // 请求失败最大重试次数（换号重试）
+	publicInitialCreditX1e4 int64        // 公开上传账号初始入账金额（美元，放大 1e4）
+	publicFullCreditX1e4    int64        // 公开上传账号满额度总金额（美元，放大 1e4）
 	stopCh                  chan struct{}
 	wg                      sync.WaitGroup
 
@@ -840,6 +842,34 @@ func truthyEnv(v string) bool {
 	default:
 		return false
 	}
+}
+
+func normalizePreferredPlanType(plan string) string {
+	normalized := NormalizePlanType(plan)
+	switch normalized {
+	case "free", "plus", "pro", "team", "enterprise":
+		return normalized
+	default:
+		return ""
+	}
+}
+
+func clampPreferredPlanBonus(bonus int) int {
+	if bonus < 0 {
+		return 0
+	}
+	if bonus > 200 {
+		return 200
+	}
+	return bonus
+}
+
+func matchPreferredPlan(plan string, preferred string) bool {
+	preferred = normalizePreferredPlanType(preferred)
+	if preferred == "" {
+		return false
+	}
+	return NormalizePlanType(plan) == preferred
 }
 
 func moneyToScaled(value float64) int64 {
@@ -899,6 +929,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.autoCleanFullUsageMode.Store(fullUsageMode)
 	s.autoCleanError.Store(settings.AutoCleanError)
 	s.autoCleanExpired.Store(settings.AutoCleanExpired)
+	s.preferredPlanType.Store(normalizePreferredPlanType(settings.SchedulerPreferredPlan))
+	atomic.StoreInt64(&s.preferredPlanBonus, int64(clampPreferredPlanBonus(settings.SchedulerPlanBonus)))
 	retries := int64(settings.MaxRetries)
 	if retries <= 0 {
 		retries = 2 // 默认重试 2 次
@@ -912,7 +944,11 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	fastEnabled := fastSchedulerEnabledFromEnv() || settings.FastSchedulerEnabled
 	s.fastSchedulerEnabled.Store(fastEnabled)
 	if fastEnabled {
-		s.fastScheduler.Store(NewFastScheduler(int64(settings.MaxConcurrency)))
+		s.fastScheduler.Store(NewFastScheduler(
+			int64(settings.MaxConcurrency),
+			s.GetPreferredPlanType(),
+			float64(s.GetPreferredPlanBonus()),
+		))
 		log.Printf("快速调度器已启用（请求热路径将优先走本地内存调度器）")
 	}
 
@@ -1004,6 +1040,52 @@ func (s *Store) FastSchedulerEnabled() bool {
 		return false
 	}
 	return s.fastSchedulerEnabled.Load()
+}
+
+// GetPreferredPlanType 获取指定套餐优先调度配置
+func (s *Store) GetPreferredPlanType() string {
+	if s == nil {
+		return ""
+	}
+	v := s.preferredPlanType.Load()
+	plan, _ := v.(string)
+	return normalizePreferredPlanType(plan)
+}
+
+// GetPreferredPlanBonus 获取指定套餐额外调度加分
+func (s *Store) GetPreferredPlanBonus() int {
+	if s == nil {
+		return 0
+	}
+	return int(atomic.LoadInt64(&s.preferredPlanBonus))
+}
+
+// SetPreferredPlanPriority 设置指定套餐额外调度加分
+func (s *Store) SetPreferredPlanPriority(plan string, bonus int) {
+	if s == nil {
+		return
+	}
+	normalizedPlan := normalizePreferredPlanType(plan)
+	clampedBonus := clampPreferredPlanBonus(bonus)
+	s.preferredPlanType.Store(normalizedPlan)
+	atomic.StoreInt64(&s.preferredPlanBonus, int64(clampedBonus))
+	// 快速调度器需要按新的 score 重新排序。
+	s.rebuildFastScheduler()
+}
+
+func (s *Store) schedulerPlanBonus(planType string) float64 {
+	if s == nil {
+		return 0
+	}
+	preferred := s.GetPreferredPlanType()
+	bonus := s.GetPreferredPlanBonus()
+	if preferred == "" || bonus <= 0 {
+		return 0
+	}
+	if matchPreferredPlan(planType, preferred) {
+		return float64(bonus)
+	}
+	return 0
 }
 
 // GetProxyURL 获取全局代理地址
@@ -1389,6 +1471,7 @@ func (s *Store) NextExcluding(exclude map[int64]bool) *Account {
 
 		load := atomic.LoadInt64(&acc.ActiveRequests)
 		tier, score, limit := acc.schedulerSnapshot(maxConcurrency)
+		score += s.schedulerPlanBonus(acc.GetPlanType())
 		if limit <= 0 || load >= limit {
 			continue
 		}

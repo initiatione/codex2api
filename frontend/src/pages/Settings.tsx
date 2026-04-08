@@ -1,8 +1,9 @@
 import type { ChangeEvent, KeyboardEvent } from 'react'
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api, resetAdminAuthState, setAdminKey } from '../api'
 import PageHeader from '../components/PageHeader'
+import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
 import ToastNotice from '../components/ToastNotice'
 import { useDataLoader } from '../hooks/useDataLoader'
@@ -41,6 +42,7 @@ function normalizeFullUsageMode(mode: string | undefined, legacyEnabled: boolean
 }
 
 export default function Settings() {
+  const PUBLIC_KEYS_PAGE_SIZE = 10
   const { t } = useTranslation()
   const booleanOptions = [
     { label: t('common.disabled'), value: 'false' },
@@ -60,6 +62,7 @@ export default function Settings() {
   const [redeemAmount, setRedeemAmount] = useState('1')
   const [redeemCodesText, setRedeemCodesText] = useState('')
   const [importingRedeemCodes, setImportingRedeemCodes] = useState(false)
+  const [publicKeysPage, setPublicKeysPage] = useState(1)
   const [settingsForm, setSettingsForm] = useState<SystemSettings>({
     max_concurrency: 2,
     global_rpm: 0,
@@ -77,6 +80,8 @@ export default function Settings() {
     auto_clean_full_usage_mode: 'off',
     proxy_pool_enabled: false,
     fast_scheduler_enabled: false,
+    scheduler_preferred_plan: '',
+    scheduler_plan_bonus: 0,
     max_retries: 2,
     allow_remote_migration: false,
     public_initial_credit_usd: 0.1,
@@ -106,6 +111,8 @@ export default function Settings() {
       ...settings,
       auto_clean_full_usage_mode: fullUsageMode,
       auto_clean_full_usage: fullUsageMode !== 'off',
+      scheduler_preferred_plan: settings.scheduler_preferred_plan ?? '',
+      scheduler_plan_bonus: settings.scheduler_plan_bonus ?? 0,
     })
     setLoadedAdminSecret(settings.admin_secret ?? '')
     setModelList(modelsResp.models ?? [])
@@ -272,6 +279,8 @@ export default function Settings() {
         ...updated,
         auto_clean_full_usage_mode: fullUsageMode,
         auto_clean_full_usage: fullUsageMode !== 'off',
+        scheduler_preferred_plan: updated.scheduler_preferred_plan ?? '',
+        scheduler_plan_bonus: updated.scheduler_plan_bonus ?? 0,
       })
       setLoadedAdminSecret(updated.admin_secret ?? '')
       if (updated.admin_auth_source !== 'env') {
@@ -294,10 +303,28 @@ export default function Settings() {
   }
 
   const { health, keys, pubKeys, redeemSummaries } = data
+  const publicKeysTotalPages = Math.max(1, Math.ceil(pubKeys.length / PUBLIC_KEYS_PAGE_SIZE))
+  const publicKeysSafePage = Math.min(publicKeysPage, publicKeysTotalPages)
+  const publicKeysPageItems = pubKeys.slice((publicKeysSafePage - 1) * PUBLIC_KEYS_PAGE_SIZE, publicKeysSafePage * PUBLIC_KEYS_PAGE_SIZE)
   const isExternalDatabase = settingsForm.database_driver === 'postgres'
   const isExternalCache = settingsForm.cache_driver === 'redis'
   const showConnectionPool = isExternalDatabase || isExternalCache
   const canConfigureRemoteMigration = settingsForm.admin_auth_source === 'env' || settingsForm.admin_secret.trim() !== ''
+  useEffect(() => {
+    if (publicKeysPage > publicKeysTotalPages) {
+      setPublicKeysPage(publicKeysTotalPages)
+    }
+  }, [publicKeysPage, publicKeysTotalPages])
+
+  const preferredPlanOptions = [
+    { label: t('settings.schedulerPreferredPlanOff'), value: '' },
+    { label: 'Free', value: 'free' },
+    { label: 'Plus', value: 'plus' },
+    { label: 'Pro', value: 'pro' },
+    { label: 'Team', value: 'team' },
+    { label: 'Enterprise', value: 'enterprise' },
+  ]
+
   return (
     <StateShell
       variant="page"
@@ -454,7 +481,7 @@ export default function Settings() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {pubKeys.map((keyRow) => (
+                        {publicKeysPageItems.map((keyRow) => (
                           <TableRow key={keyRow.id}>
                             <TableCell className="text-[14px] font-medium">{keyRow.name}</TableCell>
                             <TableCell>
@@ -473,6 +500,13 @@ export default function Settings() {
                       </TableBody>
                     </Table>
                   </div>
+                  <Pagination
+                    page={publicKeysSafePage}
+                    totalPages={publicKeysTotalPages}
+                    onPageChange={setPublicKeysPage}
+                    totalItems={pubKeys.length}
+                    pageSize={PUBLIC_KEYS_PAGE_SIZE}
+                  />
                 </StateShell>
 
                 <div className="text-xs text-muted-foreground mt-3">
@@ -763,6 +797,28 @@ export default function Settings() {
                   options={booleanOptions}
                 />
                 <p className="text-xs text-muted-foreground mt-1">{t('settings.fastSchedulerEnabledDesc')}</p>
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.schedulerPreferredPlan')}</label>
+                <Select
+                  value={settingsForm.scheduler_preferred_plan || ''}
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, scheduler_preferred_plan: value }))}
+                  options={preferredPlanOptions}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.schedulerPreferredPlanDesc')}</p>
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.schedulerPlanBonus')}</label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={200}
+                  value={settingsForm.scheduler_plan_bonus}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                    setSettingsForm((f) => ({ ...f, scheduler_plan_bonus: Number.parseInt(e.target.value, 10) || 0 }))
+                  }
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.schedulerPlanBonusDesc')}</p>
               </div>
             </div>
             <h3 className="text-base font-semibold text-foreground mb-4 mt-6">{t('settings.security')}</h3>

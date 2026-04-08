@@ -202,6 +202,8 @@ export interface SystemSettings {
   auto_clean_expired: boolean
   proxy_pool_enabled: boolean
   fast_scheduler_enabled: boolean
+  scheduler_preferred_plan: string
+  scheduler_plan_bonus: number
   max_retries: number
   allow_remote_migration: boolean
   public_initial_credit_usd: number
