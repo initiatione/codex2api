@@ -41,9 +41,12 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	switch resp.StatusCode {
 	case http.StatusOK:
 		h.store.ReportRequestSuccess(account, 0)
-		if cooldownUntil, cooldownReason, active := account.GetCooldownSnapshot(); active && cooldownReason == "full_usage" && time.Now().Before(cooldownUntil) {
-			// 满额度等待模式下，探针成功也不提前放出，等待到额度恢复时间再自动退出
-			return nil
+		if _, cooldownReason, active := account.GetCooldownSnapshot(); active && cooldownReason == "full_usage" {
+			// 允许提前恢复：探针成功后按最新用量快照重判；
+			// 仍满用量则继续等待，不满用量则立即退出等待模式。
+			if h.store.MarkFullUsageCooldownFromSnapshot(account) {
+				return nil
+			}
 		}
 		h.store.ClearCooldown(account)
 		return nil

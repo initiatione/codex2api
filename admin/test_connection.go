@@ -119,7 +119,11 @@ func (h *Handler) TestConnection(c *gin.Context) {
 			}
 		case "response.completed":
 			account.ClearLastFailureDetail()
-			if cooldownUntil, cooldownReason, active := account.GetCooldownSnapshot(); !(active && cooldownReason == "full_usage" && time.Now().Before(cooldownUntil)) {
+			if _, cooldownReason, active := account.GetCooldownSnapshot(); active && cooldownReason == "full_usage" {
+				if !h.store.MarkFullUsageCooldownFromSnapshot(account) {
+					h.store.ClearCooldown(account)
+				}
+			} else {
 				h.store.ClearCooldown(account)
 			}
 			duration := time.Since(start).Milliseconds()
@@ -319,7 +323,11 @@ func (h *Handler) BatchTest(c *gin.Context) {
 					h.store.PersistUsageSnapshot(acc, usagePct)
 				}
 				acc.ClearLastFailureDetail()
-				if cooldownUntil, cooldownReason, active := acc.GetCooldownSnapshot(); !(active && cooldownReason == "full_usage" && time.Now().Before(cooldownUntil)) {
+				if _, cooldownReason, active := acc.GetCooldownSnapshot(); active && cooldownReason == "full_usage" {
+					if !h.store.MarkFullUsageCooldownFromSnapshot(acc) {
+						h.store.ClearCooldown(acc)
+					}
+				} else {
 					h.store.ClearCooldown(acc)
 				}
 				atomic.AddInt64(&successCount, 1)

@@ -265,6 +265,44 @@ func (a *Account) recentSuccessRateLocked() float64 {
 	return float64(sum) / float64(a.RecentResultsCnt)
 }
 
+func (a *Account) currentUsagePercentLocked() (float64, bool) {
+	maxUsage := 0.0
+	valid := false
+	if a.UsagePercent7dValid {
+		maxUsage = a.UsagePercent7d
+		valid = true
+	}
+	if a.UsagePercent5hValid {
+		if !valid || a.UsagePercent5h > maxUsage {
+			maxUsage = a.UsagePercent5h
+		}
+		valid = true
+	}
+	return maxUsage, valid
+}
+
+// usagePriorityBonusLocked 高用量优先调度：>80% 逐级加分，推动先消耗高进度账号。
+func (a *Account) usagePriorityBonusLocked() float64 {
+	usagePct, ok := a.currentUsagePercentLocked()
+	if !ok {
+		return 0
+	}
+	switch {
+	case usagePct >= 98:
+		return 50
+	case usagePct >= 95:
+		return 40
+	case usagePct >= 90:
+		return 30
+	case usagePct >= 85:
+		return 22
+	case usagePct >= 80:
+		return 15
+	default:
+		return 0
+	}
+}
+
 // linearDecay 线性衰减：返回 base × max(0, 1 - elapsed/window)
 func linearDecay(base float64, elapsed, window time.Duration) float64 {
 	if elapsed >= window || window <= 0 {
@@ -314,17 +352,9 @@ func (a *Account) schedulerBreakdownLocked() SchedulerBreakdown {
 		}
 	}
 
-	if a.UsagePercent7dValid && strings.EqualFold(a.PlanType, "free") {
-		switch {
-		case a.UsagePercent7d >= 100:
-			breakdown.UsagePenalty7d = 40
-		case a.UsagePercent7d >= 95:
-			breakdown.UsagePenalty7d = 30
-		case a.UsagePercent7d >= 85:
-			breakdown.UsagePenalty7d = 18
-		case a.UsagePercent7d >= 70:
-			breakdown.UsagePenalty7d = 8
-		}
+	usagePct, usageValid := a.currentUsagePercentLocked()
+	if usageValid && usagePct >= 100 {
+		breakdown.UsagePenalty7d = 40
 	}
 
 	switch {
@@ -344,6 +374,7 @@ func (a *Account) schedulerBreakdownLocked() SchedulerBreakdown {
 func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
 	now := time.Now()
 	breakdown := a.schedulerBreakdownLocked()
+	usagePriorityBonus := a.usagePriorityBonusLocked()
 	score := 100.0 -
 		breakdown.UnauthorizedPenalty -
 		breakdown.RateLimitPenalty -
@@ -354,7 +385,8 @@ func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
 		breakdown.LatencyPenalty -
 		breakdown.SuccessRatePenalty +
 		breakdown.SuccessBonus +
-		breakdown.ProvenBonus
+		breakdown.ProvenBonus +
+		usagePriorityBonus
 
 	tier := HealthTierHealthy
 	switch {
@@ -369,14 +401,6 @@ func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
 	}
 	if !a.LastUnauthorizedAt.IsZero() && now.Sub(a.LastUnauthorizedAt) < 24*time.Hour && tier == HealthTierHealthy {
 		tier = HealthTierWarm
-	}
-	if a.UsagePercent7dValid && strings.EqualFold(a.PlanType, "free") {
-		switch {
-		case a.UsagePercent7d >= 95:
-			tier = HealthTierRisky
-		case a.UsagePercent7d >= 85 && tier == HealthTierHealthy:
-			tier = HealthTierWarm
-		}
 	}
 	if a.HealthTier == HealthTierBanned {
 		tier = HealthTierBanned
@@ -2391,7 +2415,33 @@ func (s *Store) RefreshSingle(ctx context.Context, dbID int64) error {
 	if target == nil {
 		return fmt.Errorf("账号 %d 不存在", dbID)
 	}
-	return s.refreshAccount(ctx, target)
+	if err := s.refreshAccount(ctx, target); err != nil {
+		return err
+	}
+
+	// full_usage 等待态下，手动刷新后立即补一次探针。
+	// 若额度已提前恢复，可立即退出等待模式；若仍满用量则保持等待。
+	if _, reason, active := target.GetCooldownSnapshot(); !(active && reason == "full_usage") {
+		return nil
+	}
+
+	s.usageProbeMu.RLock()
+	probeFn := s.usageProbe
+	s.usageProbeMu.RUnlock()
+	if probeFn == nil {
+		return nil
+	}
+	if !target.TryBeginUsageProbe() {
+		return nil
+	}
+	defer target.FinishUsageProbe()
+
+	probeCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	if err := probeFn(probeCtx, target); err != nil {
+		log.Printf("[账号 %d] 刷新后用量探针失败: %v", target.DBID, err)
+	}
+	return nil
 }
 
 // AccountCount 返回账号数量
