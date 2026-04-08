@@ -71,6 +71,8 @@ func main() {
 			AutoCleanUnauthorized:  false,
 			AutoCleanRateLimited:   false,
 			AutoCleanFullUsageMode: auth.AutoCleanFullUsageModeOff,
+			PlusPortEnabled:        false,
+			PlusPortAccessFree:     true,
 			PublicInitialCreditUSD: 0.1,
 			PublicFullCreditUSD:    2,
 		}
@@ -84,6 +86,8 @@ func main() {
 			TestConcurrency:        50,
 			PgMaxConns:             50,
 			RedisPoolSize:          30,
+			PlusPortEnabled:        false,
+			PlusPortAccessFree:     true,
 			PublicInitialCreditUSD: 0.1,
 			PublicFullCreditUSD:    2,
 		}
@@ -229,10 +233,21 @@ func main() {
 	})
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
+	plusAddr := fmt.Sprintf(":%d", cfg.Port+1)
+	plusPortEnabled := store.GetPlusPortEnabled()
 	log.Println("==========================================")
 	log.Printf("  Codex2API v2 已启动")
 	log.Printf("  HTTP:   http://0.0.0.0%s", addr)
 	log.Printf("  管理台: http://0.0.0.0%s/admin/", addr)
+	if plusPortEnabled {
+		log.Printf("  Plus端口: http://0.0.0.0%s (访问策略: 全套餐%s)", plusAddr, func() string {
+			if store.GetPlusPortAccessFree() {
+				return "+free"
+			}
+			return "，不含free"
+		}())
+		log.Printf("  主端口策略: 仅 free 套餐")
+	}
 	log.Printf("  API:    POST /v1/chat/completions")
 	log.Printf("  API:    POST /v1/responses")
 	log.Printf("  API:    POST /v1/responses/compact (compat)")
@@ -241,18 +256,48 @@ func main() {
 	log.Printf("  Compat: GET  /models")
 	log.Println("==========================================")
 
+	mainSrv := &http.Server{
+		Addr:    addr,
+		Handler: r,
+	}
+
+	var plusSrv *http.Server
+	if plusPortEnabled {
+		plusSrv = &http.Server{
+			Addr:    plusAddr,
+			Handler: r,
+		}
+	}
+
 	// 优雅关闭
 	go func() {
-		if err := r.Run(addr); err != nil {
+		if err := mainSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP 服务启动失败: %v", err)
 		}
 	}()
+	if plusSrv != nil {
+		go func() {
+			if err := plusSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("Plus 端口服务启动失败: %v", err)
+			}
+		}()
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Println("正在关闭...")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := mainSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("主 HTTP 服务关闭异常: %v", err)
+	}
+	if plusSrv != nil {
+		if err := plusSrv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Plus 端口服务关闭异常: %v", err)
+		}
+	}
 	store.Stop()
 	wsrelay.ShutdownExecutor()
 	proxy.CloseErrorLogger()

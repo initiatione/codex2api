@@ -202,6 +202,8 @@ export interface SystemSettings {
   auto_clean_expired: boolean
   proxy_pool_enabled: boolean
   fast_scheduler_enabled: boolean
+  plus_port_enabled: boolean
+  plus_port_access_free: boolean
   scheduler_preferred_plan: string
   scheduler_plan_bonus: number
   max_retries: number

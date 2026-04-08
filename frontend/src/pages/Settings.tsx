@@ -80,6 +80,8 @@ export default function Settings() {
     auto_clean_full_usage_mode: 'off',
     proxy_pool_enabled: false,
     fast_scheduler_enabled: false,
+    plus_port_enabled: false,
+    plus_port_access_free: true,
     scheduler_preferred_plan: '',
     scheduler_plan_bonus: 0,
     max_retries: 2,
@@ -111,6 +113,8 @@ export default function Settings() {
       ...settings,
       auto_clean_full_usage_mode: fullUsageMode,
       auto_clean_full_usage: fullUsageMode !== 'off',
+      plus_port_enabled: settings.plus_port_enabled ?? false,
+      plus_port_access_free: settings.plus_port_access_free ?? true,
       scheduler_preferred_plan: settings.scheduler_preferred_plan ?? '',
       scheduler_plan_bonus: settings.scheduler_plan_bonus ?? 0,
     })
@@ -279,6 +283,8 @@ export default function Settings() {
         ...updated,
         auto_clean_full_usage_mode: fullUsageMode,
         auto_clean_full_usage: fullUsageMode !== 'off',
+        plus_port_enabled: updated.plus_port_enabled ?? false,
+        plus_port_access_free: updated.plus_port_access_free ?? true,
         scheduler_preferred_plan: updated.scheduler_preferred_plan ?? '',
         scheduler_plan_bonus: updated.scheduler_plan_bonus ?? 0,
       })
@@ -797,6 +803,25 @@ export default function Settings() {
                   options={booleanOptions}
                 />
                 <p className="text-xs text-muted-foreground mt-1">{t('settings.fastSchedulerEnabledDesc')}</p>
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.plusPortEnabled')}</label>
+                <Select
+                  value={settingsForm.plus_port_enabled ? 'true' : 'false'}
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, plus_port_enabled: value === 'true' }))}
+                  options={booleanOptions}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.plusPortEnabledDesc')}</p>
+              </div>
+              <div>
+                <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.plusPortAccessFree')}</label>
+                <Select
+                  value={settingsForm.plus_port_access_free ? 'true' : 'false'}
+                  disabled={!settingsForm.plus_port_enabled}
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, plus_port_access_free: value === 'true' }))}
+                  options={booleanOptions}
+                />
+                <p className="text-xs text-muted-foreground mt-1">{t('settings.plusPortAccessFreeDesc')}</p>
               </div>
               <div>
                 <label className="block mb-2 text-sm font-semibold text-muted-foreground">{t('settings.schedulerPreferredPlan')}</label>

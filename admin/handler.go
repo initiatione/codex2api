@@ -1897,6 +1897,8 @@ type settingsResponse struct {
 	AutoCleanExpired       bool    `json:"auto_clean_expired"`
 	ProxyPoolEnabled       bool    `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled   bool    `json:"fast_scheduler_enabled"`
+	PlusPortEnabled        bool    `json:"plus_port_enabled"`
+	PlusPortAccessFree     bool    `json:"plus_port_access_free"`
 	SchedulerPreferredPlan string  `json:"scheduler_preferred_plan"`
 	SchedulerPlanBonus     int     `json:"scheduler_plan_bonus"`
 	MaxRetries             int     `json:"max_retries"`
@@ -1927,6 +1929,8 @@ type updateSettingsReq struct {
 	AutoCleanExpired       *bool    `json:"auto_clean_expired"`
 	ProxyPoolEnabled       *bool    `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled   *bool    `json:"fast_scheduler_enabled"`
+	PlusPortEnabled        *bool    `json:"plus_port_enabled"`
+	PlusPortAccessFree     *bool    `json:"plus_port_access_free"`
 	SchedulerPreferredPlan *string  `json:"scheduler_preferred_plan"`
 	SchedulerPlanBonus     *int     `json:"scheduler_plan_bonus"`
 	MaxRetries             *int     `json:"max_retries"`
@@ -1978,6 +1982,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AutoCleanExpired:       h.store.GetAutoCleanExpired(),
 		ProxyPoolEnabled:       h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
+		PlusPortEnabled:        h.store.GetPlusPortEnabled(),
+		PlusPortAccessFree:     h.store.GetPlusPortAccessFree(),
 		SchedulerPreferredPlan: h.store.GetPreferredPlanType(),
 		SchedulerPlanBonus:     h.store.GetPreferredPlanBonus(),
 		MaxRetries:             h.store.GetMaxRetries(),
@@ -2135,6 +2141,14 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetFastSchedulerEnabled(*req.FastSchedulerEnabled)
 		log.Printf("设置已更新: fast_scheduler_enabled = %t", *req.FastSchedulerEnabled)
 	}
+	if req.PlusPortEnabled != nil {
+		h.store.SetPlusPortEnabled(*req.PlusPortEnabled)
+		log.Printf("设置已更新: plus_port_enabled = %t", *req.PlusPortEnabled)
+	}
+	if req.PlusPortAccessFree != nil {
+		h.store.SetPlusPortAccessFree(*req.PlusPortAccessFree)
+		log.Printf("设置已更新: plus_port_access_free = %t", *req.PlusPortAccessFree)
+	}
 
 	preferredPlan := h.store.GetPreferredPlanType()
 	preferredBonus := h.store.GetPreferredPlanBonus()
@@ -2228,6 +2242,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanExpired:       h.store.GetAutoCleanExpired(),
 		ProxyPoolEnabled:       h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
+		PlusPortEnabled:        h.store.GetPlusPortEnabled(),
+		PlusPortAccessFree:     h.store.GetPlusPortAccessFree(),
 		SchedulerPreferredPlan: h.store.GetPreferredPlanType(),
 		SchedulerPlanBonus:     h.store.GetPreferredPlanBonus(),
 		MaxRetries:             h.store.GetMaxRetries(),
@@ -2270,6 +2286,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanExpired:       h.store.GetAutoCleanExpired(),
 		ProxyPoolEnabled:       h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:   h.store.FastSchedulerEnabled(),
+		PlusPortEnabled:        h.store.GetPlusPortEnabled(),
+		PlusPortAccessFree:     h.store.GetPlusPortAccessFree(),
 		SchedulerPreferredPlan: h.store.GetPreferredPlanType(),
 		SchedulerPlanBonus:     h.store.GetPreferredPlanBonus(),
 		MaxRetries:             h.store.GetMaxRetries(),

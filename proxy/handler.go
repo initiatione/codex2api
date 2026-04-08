@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +32,8 @@ type Handler struct {
 	db         *database.DB
 	cfg        *config.Config       // 全局配置
 	deviceCfg  *DeviceProfileConfig // 设备指纹配置
+	// plus 端口是否在当前进程启动时实际开启（端口监听变更需重启）
+	plusPortListening bool
 
 	// 动态 key 缓存
 	dbKeysMu    sync.RWMutex
@@ -46,12 +50,17 @@ type usageLimitDetails struct {
 
 // NewHandler 创建处理器
 func NewHandler(store *auth.Store, db *database.DB, cfg *config.Config, deviceCfg *DeviceProfileConfig) *Handler {
+	plusPortListening := false
+	if store != nil {
+		plusPortListening = store.GetPlusPortEnabled()
+	}
 	return &Handler{
-		store:      store,
-		configKeys: make(map[string]bool), // 不再使用硬编码，但保留结构以向后兼容逻辑
-		db:         db,
-		cfg:        cfg,
-		deviceCfg:  deviceCfg,
+		store:             store,
+		configKeys:        make(map[string]bool), // 不再使用硬编码，但保留结构以向后兼容逻辑
+		db:                db,
+		cfg:               cfg,
+		deviceCfg:         deviceCfg,
+		plusPortListening: plusPortListening,
 	}
 }
 
@@ -308,6 +317,157 @@ func shouldUseWebsocketTransport(cfg *config.Config, req *http.Request) bool {
 	return isWebsocketUpgrade(req.Header)
 }
 
+func parsePortString(raw string) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	p, err := strconv.Atoi(raw)
+	if err != nil || p <= 0 {
+		return 0
+	}
+	return p
+}
+
+func parsePortFromAddr(addr string) int {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return 0
+	}
+	// 优先 split host:port（支持 IPv6）
+	if _, port, err := net.SplitHostPort(addr); err == nil {
+		return parsePortString(port)
+	}
+	// 兜底：按最后一个冒号取端口
+	if idx := strings.LastIndex(addr, ":"); idx >= 0 && idx+1 < len(addr) {
+		return parsePortString(addr[idx+1:])
+	}
+	return 0
+}
+
+func resolveRequestPort(req *http.Request) int {
+	if req == nil {
+		return 0
+	}
+	if local := req.Context().Value(http.LocalAddrContextKey); local != nil {
+		if addr, ok := local.(net.Addr); ok && addr != nil {
+			if p := parsePortFromAddr(addr.String()); p > 0 {
+				return p
+			}
+		}
+	}
+	if p := parsePortFromAddr(req.Host); p > 0 {
+		return p
+	}
+	if p := parsePortFromAddr(req.URL.Host); p > 0 {
+		return p
+	}
+	return 0
+}
+
+func (h *Handler) shouldApplyPlusPortPolicy() bool {
+	if h == nil || h.store == nil || h.cfg == nil {
+		return false
+	}
+	return h.plusPortListening
+}
+
+func (h *Handler) allowAccountForCurrentPort(c *gin.Context, acc *auth.Account) bool {
+	if acc == nil {
+		return false
+	}
+	if !h.shouldApplyPlusPortPolicy() {
+		return true
+	}
+	reqPort := resolveRequestPort(c.Request)
+	if reqPort <= 0 {
+		// 无法识别端口时不强行拦截，避免反代链路误杀。
+		return true
+	}
+	mainPort := h.cfg.Port
+	plusPort := h.cfg.Port + 1
+	planType := auth.NormalizePlanType(acc.GetPlanType())
+	isFree := planType == "free"
+
+	switch reqPort {
+	case mainPort:
+		// plus 端口开启后，主端口仅允许 free。
+		return isFree
+	case plusPort:
+		// plus 端口允许全部套餐；是否包含 free 受配置控制。
+		if isFree && !h.store.GetPlusPortAccessFree() {
+			return false
+		}
+		return true
+	default:
+		// 其他端口保持历史行为，避免影响非预期端口场景。
+		return true
+	}
+}
+
+func (h *Handler) acquireAccountForRequest(c *gin.Context, exclude map[int64]bool) *auth.Account {
+	if h == nil || h.store == nil {
+		return nil
+	}
+	if exclude == nil {
+		exclude = make(map[int64]bool)
+	}
+
+	tryPick := func() *auth.Account {
+		maxScan := h.store.AccountCount() + 8
+		if maxScan < 8 {
+			maxScan = 8
+		}
+		for i := 0; i < maxScan; i++ {
+			acc := h.store.NextExcluding(exclude)
+			if acc == nil {
+				return nil
+			}
+			if h.allowAccountForCurrentPort(c, acc) {
+				return acc
+			}
+			h.store.Release(acc)
+			exclude[acc.ID()] = true
+		}
+		return nil
+	}
+
+	if acc := tryPick(); acc != nil {
+		return acc
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if c.Request.Context().Err() != nil || time.Now().After(deadline) {
+			return nil
+		}
+		waitFor := time.Until(deadline)
+		if waitFor > 3*time.Second {
+			waitFor = 3 * time.Second
+		}
+		if waitFor <= 0 {
+			return nil
+		}
+		acc := h.store.WaitForAvailable(c.Request.Context(), waitFor)
+		if acc == nil {
+			continue
+		}
+		if exclude[acc.ID()] {
+			h.store.Release(acc)
+			continue
+		}
+		if h.allowAccountForCurrentPort(c, acc) {
+			return acc
+		}
+		h.store.Release(acc)
+		exclude[acc.ID()] = true
+
+		if acc2 := tryPick(); acc2 != nil {
+			return acc2
+		}
+	}
+}
+
 // RegisterRoutes 注册路由
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	registerOpenAIRoutes := func(group *gin.RouterGroup) {
@@ -536,20 +696,16 @@ func (h *Handler) Responses(c *gin.Context) {
 	excludeAccounts := make(map[int64]bool) // 重试时排除已失败的账号
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account := h.store.NextExcluding(excludeAccounts)
+		account := h.acquireAccountForRequest(c, excludeAccounts)
 		if account == nil {
-			// 排队等待可用账号（最多 30s）
-			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
-			if account == nil {
-				if lastStatusCode != 0 && len(lastBody) > 0 {
-					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
-					return
-				}
-				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"error": gin.H{"message": "无可用账号，请稍后重试", "type": "server_error"},
-				})
+			if lastStatusCode != 0 && len(lastBody) > 0 {
+				h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 				return
 			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"message": "无可用账号，请稍后重试", "type": "server_error"},
+			})
+			return
 		}
 
 		start := time.Now()
@@ -939,20 +1095,16 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	excludeAccounts := make(map[int64]bool) // 重试时排除已失败的账号
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account := h.store.NextExcluding(excludeAccounts)
+		account := h.acquireAccountForRequest(c, excludeAccounts)
 		if account == nil {
-			// 排队等待可用账号（最多 30s）
-			account = h.store.WaitForAvailable(c.Request.Context(), 30*time.Second)
-			if account == nil {
-				if lastStatusCode != 0 && len(lastBody) > 0 {
-					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
-					return
-				}
-				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"error": gin.H{"message": "无可用账号，请稍后重试", "type": "server_error"},
-				})
+			if lastStatusCode != 0 && len(lastBody) > 0 {
+				h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 				return
 			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{"message": "无可用账号，请稍后重试", "type": "server_error"},
+			})
+			return
 		}
 
 		start := time.Now()

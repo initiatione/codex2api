@@ -310,6 +310,8 @@ func (db *DB) migrate(ctx context.Context) error {
 		auto_clean_rate_limited BOOLEAN DEFAULT FALSE,
 		auto_clean_full_usage BOOLEAN DEFAULT FALSE,
 		auto_clean_full_usage_mode VARCHAR(20) DEFAULT 'off',
+		plus_port_enabled BOOLEAN DEFAULT FALSE,
+		plus_port_access_free BOOLEAN DEFAULT TRUE,
 		scheduler_preferred_plan VARCHAR(30) DEFAULT '',
 		scheduler_plan_bonus INT DEFAULT 0
 	);
@@ -328,6 +330,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_expired BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS public_initial_credit_usd NUMERIC(12,4) DEFAULT 0.1;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS public_full_credit_usd NUMERIC(12,4) DEFAULT 2;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS plus_port_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS plus_port_access_free BOOLEAN DEFAULT TRUE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS scheduler_preferred_plan VARCHAR(30) DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS scheduler_plan_bonus INT DEFAULT 0;
 	UPDATE system_settings
@@ -470,6 +474,8 @@ type SystemSettings struct {
 	AutoCleanExpired       bool
 	ProxyPoolEnabled       bool
 	FastSchedulerEnabled   bool
+	PlusPortEnabled        bool
+	PlusPortAccessFree     bool
 	SchedulerPreferredPlan string
 	SchedulerPlanBonus     int
 	MaxRetries             int
@@ -498,6 +504,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(NULLIF(auto_clean_full_usage_mode, ''), CASE WHEN COALESCE(auto_clean_full_usage, false) THEN 'delete' ELSE 'off' END),
 		       COALESCE(proxy_pool_enabled, false),
 		       COALESCE(fast_scheduler_enabled, false),
+		       COALESCE(plus_port_enabled, false),
+		       COALESCE(plus_port_access_free, true),
 		       COALESCE(scheduler_preferred_plan, ''),
 		       COALESCE(scheduler_plan_bonus, 0),
 		       COALESCE(max_retries, 2),
@@ -510,7 +518,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	`).Scan(
 		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
 		&s.AutoCleanUnauthorized, &s.AutoCleanRateLimited, &s.AdminSecret, &s.AutoCleanFullUsage, &s.AutoCleanFullUsageMode,
-		&s.ProxyPoolEnabled, &s.FastSchedulerEnabled, &s.SchedulerPreferredPlan, &s.SchedulerPlanBonus,
+		&s.ProxyPoolEnabled, &s.FastSchedulerEnabled, &s.PlusPortEnabled, &s.PlusPortAccessFree,
+		&s.SchedulerPreferredPlan, &s.SchedulerPlanBonus,
 		&s.MaxRetries, &s.AllowRemoteMigration,
 		&s.AutoCleanError, &s.AutoCleanExpired, &s.PublicInitialCreditUSD, &s.PublicFullCreditUSD,
 	)
@@ -537,10 +546,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		INSERT INTO system_settings (
 			id, max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
 			auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage, auto_clean_full_usage_mode, proxy_pool_enabled,
-			fast_scheduler_enabled, scheduler_preferred_plan, scheduler_plan_bonus, max_retries, allow_remote_migration, auto_clean_error, auto_clean_expired,
+			fast_scheduler_enabled, plus_port_enabled, plus_port_access_free, scheduler_preferred_plan, scheduler_plan_bonus, max_retries, allow_remote_migration, auto_clean_error, auto_clean_expired,
 			public_initial_credit_usd, public_full_credit_usd
 		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
 		ON CONFLICT (id) DO UPDATE SET
 			max_concurrency         = EXCLUDED.max_concurrency,
 			global_rpm              = EXCLUDED.global_rpm,
@@ -556,6 +565,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 			auto_clean_full_usage_mode = EXCLUDED.auto_clean_full_usage_mode,
 			proxy_pool_enabled      = EXCLUDED.proxy_pool_enabled,
 			fast_scheduler_enabled  = EXCLUDED.fast_scheduler_enabled,
+			plus_port_enabled       = EXCLUDED.plus_port_enabled,
+			plus_port_access_free   = EXCLUDED.plus_port_access_free,
 			scheduler_preferred_plan = EXCLUDED.scheduler_preferred_plan,
 			scheduler_plan_bonus    = EXCLUDED.scheduler_plan_bonus,
 			max_retries             = EXCLUDED.max_retries,
@@ -566,7 +577,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 			public_full_credit_usd = EXCLUDED.public_full_credit_usd
 	`, s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, fullUsageEnabled, fullUsageMode, s.ProxyPoolEnabled,
-		s.FastSchedulerEnabled, s.SchedulerPreferredPlan, s.SchedulerPlanBonus, s.MaxRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired,
+		s.FastSchedulerEnabled, s.PlusPortEnabled, s.PlusPortAccessFree, s.SchedulerPreferredPlan, s.SchedulerPlanBonus, s.MaxRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired,
 		s.PublicInitialCreditUSD, s.PublicFullCreditUSD)
 	return err
 }

@@ -827,6 +827,8 @@ type Store struct {
 	autoCleanError          atomic.Bool
 	autoCleanExpired        atomic.Bool
 	autoCleanupBatch        atomic.Bool
+	plusPortEnabled         atomic.Bool
+	plusPortAccessFree      atomic.Bool
 	preferredPlanType       atomic.Value // string: free/plus/pro/team/enterprise 或空
 	preferredPlanBonus      int64        // 指定套餐额外调度加分
 	maxRetries              int64        // 请求失败最大重试次数（换号重试）
@@ -932,6 +934,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 			TestModel:              "gpt-5.4",
 			ProxyURL:               "",
 			AutoCleanFullUsageMode: AutoCleanFullUsageModeOff,
+			PlusPortAccessFree:     true,
 		}
 	}
 	s := &Store{
@@ -953,6 +956,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.autoCleanFullUsageMode.Store(fullUsageMode)
 	s.autoCleanError.Store(settings.AutoCleanError)
 	s.autoCleanExpired.Store(settings.AutoCleanExpired)
+	s.plusPortEnabled.Store(settings.PlusPortEnabled)
+	s.plusPortAccessFree.Store(settings.PlusPortAccessFree)
 	s.preferredPlanType.Store(normalizePreferredPlanType(settings.SchedulerPreferredPlan))
 	atomic.StoreInt64(&s.preferredPlanBonus, int64(clampPreferredPlanBonus(settings.SchedulerPlanBonus)))
 	retries := int64(settings.MaxRetries)
@@ -1064,6 +1069,38 @@ func (s *Store) FastSchedulerEnabled() bool {
 		return false
 	}
 	return s.fastSchedulerEnabled.Load()
+}
+
+// SetPlusPortEnabled 设置 plus 端口开关（需重启进程后生效监听）。
+func (s *Store) SetPlusPortEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.plusPortEnabled.Store(enabled)
+}
+
+// GetPlusPortEnabled 获取 plus 端口开关。
+func (s *Store) GetPlusPortEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.plusPortEnabled.Load()
+}
+
+// SetPlusPortAccessFree 设置 plus 端口是否可访问 free 套餐账号。
+func (s *Store) SetPlusPortAccessFree(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.plusPortAccessFree.Store(enabled)
+}
+
+// GetPlusPortAccessFree 获取 plus 端口是否可访问 free 套餐账号。
+func (s *Store) GetPlusPortAccessFree() bool {
+	if s == nil {
+		return true
+	}
+	return s.plusPortAccessFree.Load()
 }
 
 // GetPreferredPlanType 获取指定套餐优先调度配置
