@@ -347,7 +347,32 @@ export default function Accounts() {
   const paidQuotaAccounts = quotaSourceAccounts.filter((account) => (account.plan_type || '').toLowerCase() !== 'free')
   const freeQuotaStats = calcFreeQuotaStats(freeQuotaAccounts, quotaRates)
   const paidQuotaStats = calcWindowedQuotaStats(paidQuotaAccounts, quotaRates)
-  const totalQuotaStats = calcWindowedQuotaStats(quotaSourceAccounts, quotaRates)
+  const totalQuota = calcWeightedTotal(quotaSourceAccounts, quotaRates)
+  const freeUsedBaseForTotal = calcWeightedUsed(freeQuotaAccounts, quotaRates, 'usage_percent_7d')
+  const paidUsed5hForTotal = calcWeightedUsed(paidQuotaAccounts, quotaRates, 'usage_percent_5h')
+  const paidUsed7dForTotal = calcWeightedUsed(paidQuotaAccounts, quotaRates, 'usage_percent_7d')
+  const totalUsed5h = freeUsedBaseForTotal + paidUsed5hForTotal
+  const totalUsed7d = freeUsedBaseForTotal + paidUsed7dForTotal
+  const totalRemaining5h = Math.max(0, totalQuota - totalUsed5h)
+  const totalRemaining7d = Math.max(0, totalQuota - totalUsed7d)
+  const totalQuotaStats: QuotaStatsWindowed = {
+    accountCount: quotaSourceAccounts.length,
+    quotaTotal: roundTo2(totalQuota),
+    usage5hUsed: roundTo2(totalUsed5h),
+    usage5hRemaining: roundTo2(totalRemaining5h),
+    usage5hUsedPercent: totalQuota > 0 ? roundTo2((totalUsed5h / totalQuota) * 100) : 0,
+    usage5hRemainingPercent: totalQuota > 0 ? roundTo2((totalRemaining5h / totalQuota) * 100) : 0,
+    usage5hUsedAccounts: roundTo2(totalUsed5h / 100),
+    usage5hRemainingAccounts: roundTo2(totalRemaining5h / 100),
+    usage7dUsed: roundTo2(totalUsed7d),
+    usage7dRemaining: roundTo2(totalRemaining7d),
+    usage7dUsedPercent: totalQuota > 0 ? roundTo2((totalUsed7d / totalQuota) * 100) : 0,
+    usage7dRemainingPercent: totalQuota > 0 ? roundTo2((totalRemaining7d / totalQuota) * 100) : 0,
+    usage7dUsedAccounts: roundTo2(totalUsed7d / 100),
+    usage7dRemainingAccounts: roundTo2(totalRemaining7d / 100),
+    waiting5hCount: calcWaitCount(quotaSourceAccounts, '5h'),
+    waiting7dCount: calcWaitCount(quotaSourceAccounts, '7d'),
+  }
 
   const filteredAccounts = accounts.filter((account) => {
     // 状态过滤
