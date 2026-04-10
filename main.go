@@ -314,6 +314,7 @@ func main() {
 func loggerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
+		c.Set("x-request-start-time", start)
 		c.Next()
 		latency := time.Since(start)
 
@@ -326,6 +327,8 @@ func loggerMiddleware() gin.HandlerFunc {
 		failedAttemptsVal, _ := c.Get("x-upstream-failed-attempts")
 		schedulerAcquireVal, _ := c.Get("x-scheduler-acquire-ms")
 		schedulerWaitRoundsVal, _ := c.Get("x-scheduler-wait-rounds")
+		upstreamStageVal, _ := c.Get("x-upstream-stage-ms")
+		firstTokenVal, _ := c.Get("x-first-token-ms")
 
 		emailStr := ""
 		if e, ok := email.(string); ok && e != "" {
@@ -359,6 +362,12 @@ func loggerMiddleware() gin.HandlerFunc {
 		}
 		if waitRounds, ok := schedulerWaitRoundsVal.(int); ok && waitRounds > 0 {
 			tags = append(tags, fmt.Sprintf("wait=%d", waitRounds))
+		}
+		if upstreamMs, ok := upstreamStageVal.(int64); ok && upstreamMs > 0 {
+			tags = append(tags, fmt.Sprintf("forward=%dms", upstreamMs))
+		}
+		if firstMs, ok := firstTokenVal.(int); ok && firstMs > 0 {
+			tags = append(tags, fmt.Sprintf("first=%dms", firstMs))
 		}
 		tagStr := ""
 		if len(tags) > 0 {
