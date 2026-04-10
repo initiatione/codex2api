@@ -376,6 +376,9 @@ func (h *Handler) allowAccountForCurrentPort(c *gin.Context, acc *auth.Account) 
 	if acc == nil {
 		return false
 	}
+	if matcher := h.accountMatcherForCurrentPort(c); matcher != nil {
+		return matcher(acc)
+	}
 	if !h.shouldApplyPlusPortPolicy() {
 		return true
 	}
@@ -405,6 +408,38 @@ func (h *Handler) allowAccountForCurrentPort(c *gin.Context, acc *auth.Account) 
 	}
 }
 
+func (h *Handler) accountMatcherForCurrentPort(c *gin.Context) auth.AccountMatcher {
+	if h == nil || h.store == nil || h.cfg == nil || c == nil || c.Request == nil {
+		return nil
+	}
+	if !h.shouldApplyPlusPortPolicy() {
+		return nil
+	}
+
+	reqPort := resolveRequestPort(c.Request)
+	if reqPort <= 0 {
+		return nil
+	}
+
+	mainPort := h.cfg.Port
+	plusPort := h.cfg.Port + 1
+	switch reqPort {
+	case mainPort:
+		return func(acc *auth.Account) bool {
+			return acc != nil && auth.NormalizePlanType(acc.GetPlanType()) == "free"
+		}
+	case plusPort:
+		if h.store.GetPlusPortAccessFree() {
+			return nil
+		}
+		return func(acc *auth.Account) bool {
+			return acc != nil && auth.NormalizePlanType(acc.GetPlanType()) != "free"
+		}
+	default:
+		return nil
+	}
+}
+
 func (h *Handler) acquireAccountForRequest(c *gin.Context, exclude map[int64]bool) *auth.Account {
 	if h == nil || h.store == nil {
 		return nil
@@ -412,27 +447,37 @@ func (h *Handler) acquireAccountForRequest(c *gin.Context, exclude map[int64]boo
 	if exclude == nil {
 		exclude = make(map[int64]bool)
 	}
+	matcher := h.accountMatcherForCurrentPort(c)
+	startedAt := time.Now()
+	waitRounds := 0
 
 	tryPick := func() *auth.Account {
-		maxScan := h.store.AccountCount() + 8
-		if maxScan < 8 {
-			maxScan = 8
+		return h.store.NextMatching(exclude, matcher)
+	}
+
+	logSlowAcquire := func(acc *auth.Account) {
+		elapsed := time.Since(startedAt)
+		if elapsed < 200*time.Millisecond {
+			return
 		}
-		for i := 0; i < maxScan; i++ {
-			acc := h.store.NextExcluding(exclude)
-			if acc == nil {
-				return nil
-			}
-			if h.allowAccountForCurrentPort(c, acc) {
-				return acc
-			}
-			h.store.Release(acc)
-			exclude[acc.ID()] = true
+		planType := ""
+		accountID := int64(0)
+		if acc != nil {
+			accountID = acc.ID()
+			planType = acc.GetPlanType()
 		}
-		return nil
+		log.Printf("调度耗时较高: elapsed=%s wait_rounds=%d request_port=%d exclude=%d picked_account=%d picked_plan=%s",
+			elapsed.Round(time.Millisecond),
+			waitRounds,
+			resolveRequestPort(c.Request),
+			len(exclude),
+			accountID,
+			planType,
+		)
 	}
 
 	if acc := tryPick(); acc != nil {
+		logSlowAcquire(acc)
 		return acc
 	}
 
@@ -448,23 +493,13 @@ func (h *Handler) acquireAccountForRequest(c *gin.Context, exclude map[int64]boo
 		if waitFor <= 0 {
 			return nil
 		}
-		acc := h.store.WaitForAvailable(c.Request.Context(), waitFor)
+		waitRounds++
+		acc := h.store.WaitForAvailableMatching(c.Request.Context(), waitFor, exclude, matcher)
 		if acc == nil {
 			continue
 		}
-		if exclude[acc.ID()] {
-			h.store.Release(acc)
-			continue
-		}
-		if h.allowAccountForCurrentPort(c, acc) {
-			return acc
-		}
-		h.store.Release(acc)
-		exclude[acc.ID()] = true
-
-		if acc2 := tryPick(); acc2 != nil {
-			return acc2
-		}
+		logSlowAcquire(acc)
+		return acc
 	}
 }
 
