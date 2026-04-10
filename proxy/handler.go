@@ -774,6 +774,7 @@ func (h *Handler) Responses(c *gin.Context) {
 
 		if reqErr != nil {
 			if kind := classifyTransportFailure(reqErr); kind != "" {
+				failedAttempts = append(failedAttempts, kind)
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
@@ -1182,6 +1183,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 		if reqErr != nil {
 			if kind := classifyTransportFailure(reqErr); kind != "" {
+				failedAttempts = append(failedAttempts, kind)
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
